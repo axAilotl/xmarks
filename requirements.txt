@@ -1,0 +1,61 @@
+# Core dependencies
+pyyaml>=6.0
+asyncio-throttle>=1.0.2
+aiofiles>=23.0.0
+aiohttp>=3.8.0
+python-dateutil>=2.8.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# LLM and AI
+openai>=1.0.0
+anthropic>=0.8.0
+ollama>=0.1.0
+sentence-transformers>=2.2.0
+transformers>=4.30.0
+
+# Vector databases
+chromadb>=0.4.0
+faiss-cpu>=1.7.0
+
+# Web scraping and content processing
+playwright>=1.40.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Media processing
+pillow>=10.0.0
+python-magic>=0.4.27
+
+# Web interface
+streamlit>=1.28.0
+gradio>=3.50.0
+
+# API server
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+
+# Obsidian integration
+obsidiantools>=0.10.0
+
+# GitHub/HuggingFace integration
+huggingface_hub>=0.19.0
+arxiv>=2.0.0
+pypdf>=3.17.0
+
+# Utilities
+tqdm>=4.65.0
+python-dotenv>=1.0.0
+click>=8.1.0
+rich>=13.0.0
+
+# Development and testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0

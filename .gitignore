@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.env
+venv/
+knowledge_vault/
+.claude/
+.clinerules/
+.env
+graphql_cache/
+.xmarks/
+
+# Cookies and bookmarks (sensitive/personal data)
+twitter_cookies.json
+twitter-bookmarks-*.json
+twitter-Bookmarks-*.json
+twitter-bookmarks-merged.json
+
+# Logs and local notes
+xmarks.log
+AGENTS.md
+CLAUDE.md
+config.json
+temp_audio/
+realtime_bookmarks.json
+download_tracking.json
