@@ -33,6 +33,7 @@
     const MAX_CACHE_SIZE = 5; // Keep only last 5 responses
 
     const pendingGraphTweets = new Set();
+    const knownBookmarks = new Set(); // Track tweets we know are bookmarked
 
     const log = (...args) => console.log('[XMarks]', ...args);
 
@@ -229,6 +230,19 @@
         return fallback;
     }
 
+    function isTweetBookmarked(respJson, tweetId) {
+        // Check if the tweet in the GraphQL response is bookmarked
+        const tweetInfo = findTweetResultInDetail(respJson, tweetId);
+        if (!tweetInfo || !tweetInfo.result) return false;
+        
+        // Check the bookmarked field in the legacy object
+        const isBookmarked = tweetInfo.result?.legacy?.bookmarked === true;
+        if (isBookmarked) {
+            log('🔖 Tweet is bookmarked:', tweetId);
+        }
+        return isBookmarked;
+    }
+
     function cacheGraphQLResponse(tweetId, response) {
         if (!tweetId || !response) return;
         
@@ -297,10 +311,8 @@
 
     function isBookmarkMutation(url, bodyObj) {
         if (!/graphql/.test(url)) return false;
-        const op = (bodyObj && bodyObj.query) || '';
-        const qid = (new URL(url)).pathname.split('/').pop() || '';
-        // Heuristics: operation/identifier contains Bookmark
-        return /Bookmark/i.test(op) || /Bookmark/i.test(qid);
+        // Check for CreateBookmark or DeleteBookmark mutations specifically
+        return /\/CreateBookmark$/.test(url) || /\/DeleteBookmark$/.test(url);
     }
 
     function isTweetDetailQuery(url, bodyObj) {
@@ -401,6 +413,7 @@
 
         if (status === 'missing' || status === 'failed') {
             log('📥 Bookmark timeline pending:', tweet.id, 'status:', status, 'processedGraph:', processedGraph);
+            knownBookmarks.add(tweet.id); // Mark as bookmarked
             await emitBookmark(tweet.id, tweet.data, 'userscript_bookmarks_timeline', {
                 expectGraphLater: true,
                 allowDuplicate: true
@@ -410,6 +423,7 @@
 
         if (status === 'processed' && !processedGraph) {
             log('⏳ Bookmark awaiting GraphQL detail:', tweet.id);
+            knownBookmarks.add(tweet.id); // Mark as bookmarked
             pendingGraphTweets.add(tweet.id);
             // Ensure the detail view is fetched to obtain GraphQL
             try {
@@ -497,22 +511,13 @@
                                     await syncBookmarksFromTimeline(respJson);
                                 }
 
-                                // If this is a TweetDetail response, cache it only
+                                // If this is a TweetDetail response, ALWAYS cache it
                                 if (respJson && isDetail) {
-                                    // DEBUG: Log the response structure
-                                    log('🔍 [DEBUG] TweetDetail Response Structure:');
-                                    log('  - Has data?', !!respJson.data);
-                                    log('  - Has threaded_conversation?', !!respJson.data?.threaded_conversation_with_injections_v2);
-                                    log('  - Has tweet.result?', !!respJson.data?.tweet?.result);
-                                    log('  - Instructions?', respJson.data?.threaded_conversation_with_injections_v2?.instructions?.length || 0);
-                                    
                                     // Try multiple extraction methods
                                     let respTweetId = extractTweetIdFromGraphQLResponse(respJson);
-                                    log('🔑 [DEBUG] extractTweetIdFromGraphQLResponse returned:', respTweetId);
                                     
                                     if (!respTweetId) {
                                         respTweetId = tweetId || extractTweetIdFromUrl(url);
-                                        log('🔑 [DEBUG] Fallback to URL extraction:', respTweetId);
                                     }
                                     
                                     // Last resort: try to get focalTweetId from URL
@@ -523,7 +528,6 @@
                                             try {
                                                 const vars = JSON.parse(variables);
                                                 respTweetId = vars.focalTweetId;
-                                                log('🔑 [DEBUG] Got focalTweetId from URL:', respTweetId);
                                             } catch (_) {}
                                         }
                                     }
@@ -531,29 +535,65 @@
                                     const finalId = respTweetId || tweetId || extractTweetIdFromUrl(url);
 
                                     if (finalId) {
+                                        // ALWAYS cache the response for potential future use
                                         cacheGraphQLResponse(finalId, respJson);
-
-                                        const statusInfo = (await fetchBookmarkStatuses([finalId]))[finalId] || {};
-                                        const needsGraph = statusInfo.status !== 'processed' || !statusInfo.processed_with_graphql;
-                                        if (needsGraph) {
-                                            const detailInfo = findTweetResultInDetail(respJson, finalId);
-                                            const detailData = detailInfo ? extractTweetDataFromResult(detailInfo.result) : null;
-                                            await emitBookmark(finalId, detailData, 'userscript_tweetdetail_refresh', {
-                                                allowDuplicate: true
-                                            });
-                                        } else {
+                                        
+                                        // Check if this tweet is actually bookmarked in the GraphQL response
+                                        const isBookmarked = isTweetBookmarked(respJson, finalId);
+                                        
+                                        if (isBookmarked) {
+                                            // Process already bookmarked tweet
+                                            knownBookmarks.add(finalId);
+                                            
+                                            const statusInfo = (await fetchBookmarkStatuses([finalId]))[finalId] || {};
+                                            const needsGraph = statusInfo.status !== 'processed' || !statusInfo.processed_with_graphql;
+                                            if (needsGraph) {
+                                                log('✅ Processing already-bookmarked tweet with GraphQL:', finalId);
+                                                const detailInfo = findTweetResultInDetail(respJson, finalId);
+                                                const detailData = detailInfo ? extractTweetDataFromResult(detailInfo.result) : null;
+                                                await emitBookmark(finalId, detailData, 'userscript_tweetdetail_bookmarked', {
+                                                    allowDuplicate: true
+                                                });
+                                            }
                                             pendingGraphTweets.delete(finalId);
+                                        } else if (pendingGraphTweets.has(finalId)) {
+                                            // This tweet is pending processing (bookmarked elsewhere)
+                                            log('📦 Processing pending bookmark with cached GraphQL:', finalId);
+                                            
+                                            const statusInfo = (await fetchBookmarkStatuses([finalId]))[finalId] || {};
+                                            const needsGraph = statusInfo.status !== 'processed' || !statusInfo.processed_with_graphql;
+                                            if (needsGraph) {
+                                                log('✅ Processing pending bookmarked tweet with GraphQL:', finalId);
+                                                const detailInfo = findTweetResultInDetail(respJson, finalId);
+                                                const detailData = detailInfo ? extractTweetDataFromResult(detailInfo.result) : null;
+                                                await emitBookmark(finalId, detailData, 'userscript_tweetdetail_pending', {
+                                                    allowDuplicate: true
+                                                });
+                                            }
+                                            pendingGraphTweets.delete(finalId);
+                                        } else {
+                                            log('💾 Cached TweetDetail for potential future use:', finalId);
                                         }
                                     } else {
                                         log('⚠️ Could not extract tweet ID from TweetDetail response');
-                                        log('⚠️ [DEBUG] First entry in response:', JSON.stringify(respJson.data?.threaded_conversation_with_injections_v2?.instructions?.[0]?.entries?.[0], null, 2).substring(0, 500));
                                     }
                                 }
                                 
                                 // Bookmark mutation = user intent. Send once via emitter.
                                 if (isBookmark) {
                                     const id = tweetId || extractTweetIdFromUrl(url);
-                                    await emitBookmark(id, null, 'userscript_fetch_mutation');
+                                    const isCreate = /\/CreateBookmark$/.test(url);
+                                    const isDelete = /\/DeleteBookmark$/.test(url);
+                                    
+                                    if (isCreate) {
+                                        log('🔖 CreateBookmark mutation detected for:', id);
+                                        knownBookmarks.add(id); // Mark as bookmarked
+                                        await emitBookmark(id, null, 'userscript_create_bookmark');
+                                    } else if (isDelete) {
+                                        log('🗑️ DeleteBookmark mutation detected for:', id);
+                                        knownBookmarks.delete(id); // Remove from bookmarks
+                                        pendingGraphTweets.delete(id);
+                                    }
                                 }
                             } catch (_) {
                                 if (isBookmark) {
@@ -613,23 +653,50 @@
                             await syncBookmarksFromTimeline(respJson);
                         }
 
-                        // TweetDetail: cache only
+                        // TweetDetail: ALWAYS cache, then check if needs processing
                         if (respJson && isDetail) {
                             const respTweetId = extractTweetIdFromGraphQLResponse(respJson) ||
                                               tweetId || extractTweetIdFromUrl(url);
                             const finalId = respTweetId || tweetId || extractTweetIdFromUrl(url);
                             if (finalId) {
+                                // ALWAYS cache the response
                                 cacheGraphQLResponse(finalId, respJson);
-                                const statusInfo = (await fetchBookmarkStatuses([finalId]))[finalId] || {};
-                                const needsGraph = statusInfo.status !== 'processed' || !statusInfo.processed_with_graphql;
-                                if (needsGraph) {
-                                    const detailInfo = findTweetResultInDetail(respJson, finalId);
-                                    const detailData = detailInfo ? extractTweetDataFromResult(detailInfo.result) : null;
-                                    await emitBookmark(finalId, detailData, 'userscript_tweetdetail_refresh_xhr', {
-                                        allowDuplicate: true
-                                    });
-                                } else {
+                                
+                                // Check if this tweet is actually bookmarked
+                                const isBookmarked = isTweetBookmarked(respJson, finalId);
+                                
+                                if (isBookmarked) {
+                                    // Process already bookmarked tweet
+                                    knownBookmarks.add(finalId);
+                                    
+                                    const statusInfo = (await fetchBookmarkStatuses([finalId]))[finalId] || {};
+                                    const needsGraph = statusInfo.status !== 'processed' || !statusInfo.processed_with_graphql;
+                                    if (needsGraph) {
+                                        log('✅ Processing already-bookmarked tweet with GraphQL (XHR):', finalId);
+                                        const detailInfo = findTweetResultInDetail(respJson, finalId);
+                                        const detailData = detailInfo ? extractTweetDataFromResult(detailInfo.result) : null;
+                                        await emitBookmark(finalId, detailData, 'userscript_tweetdetail_bookmarked_xhr', {
+                                            allowDuplicate: true
+                                        });
+                                    }
                                     pendingGraphTweets.delete(finalId);
+                                } else if (pendingGraphTweets.has(finalId)) {
+                                    // This tweet is pending processing
+                                    log('📦 Processing pending bookmark with cached GraphQL (XHR):', finalId);
+                                    
+                                    const statusInfo = (await fetchBookmarkStatuses([finalId]))[finalId] || {};
+                                    const needsGraph = statusInfo.status !== 'processed' || !statusInfo.processed_with_graphql;
+                                    if (needsGraph) {
+                                        log('✅ Processing pending bookmarked tweet with GraphQL (XHR):', finalId);
+                                        const detailInfo = findTweetResultInDetail(respJson, finalId);
+                                        const detailData = detailInfo ? extractTweetDataFromResult(detailInfo.result) : null;
+                                        await emitBookmark(finalId, detailData, 'userscript_tweetdetail_pending_xhr', {
+                                            allowDuplicate: true
+                                        });
+                                    }
+                                    pendingGraphTweets.delete(finalId);
+                                } else {
+                                    log('💾 Cached TweetDetail for potential future use (XHR):', finalId);
                                 }
                             }
                         }
@@ -637,11 +704,22 @@
                         // Bookmark mutation = user intent. Send once via emitter.
                         if (isBookmark) {
                             const id = tweetId || extractTweetIdFromUrl(url);
-                            const statusInfo = (await fetchBookmarkStatuses([id]))[id] || {};
-                            const processedGraph = !!statusInfo.processed_with_graphql;
-                            await emitBookmark(id, null, 'userscript_xhr_mutation', {
-                                expectGraphLater: !processedGraph
-                            });
+                            const isCreate = /\/CreateBookmark$/.test(url);
+                            const isDelete = /\/DeleteBookmark$/.test(url);
+                            
+                            if (isCreate) {
+                                log('🔖 CreateBookmark mutation detected for (XHR):', id);
+                                knownBookmarks.add(id); // Mark as bookmarked
+                                const statusInfo = (await fetchBookmarkStatuses([id]))[id] || {};
+                                const processedGraph = !!statusInfo.processed_with_graphql;
+                                await emitBookmark(id, null, 'userscript_create_bookmark_xhr', {
+                                    expectGraphLater: !processedGraph
+                                });
+                            } else if (isDelete) {
+                                log('🗑️ DeleteBookmark mutation detected for (XHR):', id);
+                                knownBookmarks.delete(id); // Remove from bookmarks
+                                pendingGraphTweets.delete(id);
+                            }
                         }
                 } catch (e) { /* ignore */ }
             });
@@ -684,66 +762,7 @@
         GM_notification({ title: 'XMarks', text: 'Captured ' + payload.tweet_id, timeout: 1500 });
     }
 
-    // DOM monitoring for bookmark button clicks (fallback method)
-    function installDOMMonitor() {
-        document.addEventListener('click', async function(event) {
-            // Look for bookmark button clicks
-            const target = event.target;
-            if (target && (target.closest('[data-testid="bookmark"]') || target.closest('[aria-label*="ookmark"]'))) {
-                log('🔘 Bookmark button clicked');
-                
-                // Try to extract tweet data from the DOM
-                const article = target.closest('article');
-                if (article) {
-                    try {
-                        // Extract tweet ID from the article - try multiple methods
-                        let tweetId = '';
-                        
-                        // Method 1: From time element
-                        const timeEl = article.querySelector('time');
-                        if (timeEl && timeEl.parentElement) {
-                            const href = timeEl.parentElement.getAttribute('href');
-                            if (href) {
-                                const match = href.match(/\/status\/(\d+)/);
-                                if (match) tweetId = match[1];
-                            }
-                        }
-                        
-                        // Method 2: From any link with /status/ in the article
-                        if (!tweetId) {
-                            const statusLink = article.querySelector('a[href*="/status/"]');
-                            if (statusLink) {
-                                const href = statusLink.getAttribute('href');
-                                const match = href.match(/\/status\/(\d+)/);
-                                if (match) tweetId = match[1];
-                            }
-                        }
-                        
-                        // Method 3: From the current URL if we're on a status page
-                        if (!tweetId && window.location.pathname.includes('/status/')) {
-                            const match = window.location.pathname.match(/\/status\/(\d+)/);
-                            if (match) tweetId = match[1];
-                        }
-                        
-                        if (tweetId) {
-                            // Extract basic tweet data
-                            const tweetTextEl = article.querySelector('[data-testid="tweetText"]');
-                            const tweetText = tweetTextEl ? tweetTextEl.textContent : '';
-                            const authorEl = article.querySelector('[data-testid="User-Name"]');
-                            const author = authorEl ? authorEl.textContent.split('@')[0] : '';
-                            
-                            const tweetData = { text: tweetText, author: author };
-                            await emitBookmark(tweetId, tweetData, 'userscript_click');
-                        } else {
-                            log('⚠️ Could not extract tweet ID from DOM');
-                        }
-                    } catch (e) {
-                        log('Error extracting tweet data from DOM:', e);
-                    }
-                }
-            }
-        }, true);
-    }
+    // Removed DOM monitoring - we rely on GraphQL mutations instead
 
     // One-shot guard to avoid double-sends when both DOM and mutation fire
     const pendingSends = new Map(); // tweet_id -> timeoutId
@@ -794,16 +813,5 @@
     installXHRInterceptor();
     log('✅ XHR interceptor installed');
     
-    // DOM monitor needs the document to be ready
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
-            installDOMMonitor();
-            log('✅ DOM monitor installed (after DOMContentLoaded)');
-        });
-    } else {
-        installDOMMonitor();
-        log('✅ DOM monitor installed (document already loaded)');
-    }
-    
-    log('🚀 XMarks Live Capture ready - watching for GraphQL requests...');
+    log('🚀 XMarks Live Capture ready - watching for CreateBookmark mutations...');
 })();
