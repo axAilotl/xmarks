@@ -752,6 +752,64 @@ class MetadataDB:
             logger.error(f"Failed to get bookmark queue counts: {e}")
             return {'pending': 0, 'processing': 0, 'processed': 0, 'failed': 0}
     
+    def delete_bookmark_entry(self, tweet_id: str) -> bool:
+        """Delete a bookmark from the queue."""
+        try:
+            with self._get_connection() as conn:
+                conn.execute("DELETE FROM bookmark_queue WHERE tweet_id = ?", (tweet_id,))
+                return True
+        except Exception as e:
+            logger.error(f"Failed to delete bookmark entry {tweet_id}: {e}")
+            return False
+    
+    def delete_tweet(self, tweet_id: str) -> bool:
+        """Delete tweet metadata."""
+        try:
+            with self._get_connection() as conn:
+                conn.execute("DELETE FROM tweets WHERE tweet_id = ?", (tweet_id,))
+                return True
+        except Exception as e:
+            logger.error(f"Failed to delete tweet {tweet_id}: {e}")
+            return False
+    
+    def delete_downloads_for_context(self, context: str) -> bool:
+        """Delete all download entries for a given context."""
+        try:
+            with self._get_connection() as conn:
+                # Check if the context column exists
+                cursor = conn.execute("PRAGMA table_info(downloads)")
+                columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'context' in columns:
+                    conn.execute("DELETE FROM downloads WHERE context LIKE ?", (f"%{context}%",))
+                elif 'url' in columns:
+                    # Fallback: delete by URL pattern if context column doesn't exist
+                    conn.execute("DELETE FROM downloads WHERE url LIKE ?", (f"%{context}%",))
+                
+                return True
+        except Exception as e:
+            logger.debug(f"Could not delete downloads for context {context}: {e}")
+            return False
+    
+    def delete_llm_cache_for_context(self, tweet_id: str) -> bool:
+        """Delete LLM cache entries related to a tweet."""
+        try:
+            with self._get_connection() as conn:
+                # Check if the context column exists
+                cursor = conn.execute("PRAGMA table_info(llm_cache)")
+                columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'context' in columns:
+                    conn.execute("DELETE FROM llm_cache WHERE context LIKE ?", (f"%{tweet_id}%",))
+                elif 'cache_key' in columns:
+                    # Fallback: delete by cache_key pattern if context column doesn't exist
+                    conn.execute("DELETE FROM llm_cache WHERE cache_key LIKE ?", (f"%{tweet_id}%",))
+                
+                return True
+        except Exception as e:
+            logger.debug(f"Could not delete LLM cache for tweet {tweet_id}: {e}")
+            return False
+    
     # File index operations
     def upsert_file(self, file_meta: FileMetadata) -> bool:
         """Insert or update file metadata"""

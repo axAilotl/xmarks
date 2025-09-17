@@ -593,6 +593,23 @@
                                         log('🗑️ DeleteBookmark mutation detected for:', id);
                                         knownBookmarks.delete(id); // Remove from bookmarks
                                         pendingGraphTweets.delete(id);
+                                        
+                                        // Optionally call delete API to clean up artifacts
+                                        // Uncomment the following to enable automatic cleanup:
+                                        /*
+                                        try {
+                                            GM_xmlhttpRequest({
+                                                method: 'DELETE',
+                                                url: `${XMARKS_API_URL}/api/bookmark/${id}`,
+                                                onload: (res) => {
+                                                    if (res.status >= 200 && res.status < 300) {
+                                                        log('✅ Deleted artifacts for unbookmarked tweet:', id);
+                                                    }
+                                                },
+                                                onerror: () => log('⚠️ Failed to delete artifacts for:', id)
+                                            });
+                                        } catch (_) {}
+                                        */
                                     }
                                 }
                             } catch (_) {
@@ -719,6 +736,23 @@
                                 log('🗑️ DeleteBookmark mutation detected for (XHR):', id);
                                 knownBookmarks.delete(id); // Remove from bookmarks
                                 pendingGraphTweets.delete(id);
+                                
+                                // Optionally call delete API to clean up artifacts
+                                // Uncomment the following to enable automatic cleanup:
+                                
+                                try {
+                                    GM_xmlhttpRequest({
+                                        method: 'DELETE',
+                                        url: `${XMARKS_API_URL}/api/bookmark/${id}`,
+                                        onload: (res) => {
+                                            if (res.status >= 200 && res.status < 300) {
+                                                log('✅ Deleted artifacts for unbookmarked tweet (XHR):', id);
+                                            }
+                                        },
+                                        onerror: () => log('⚠️ Failed to delete artifacts for (XHR):', id)
+                                    });
+                                } catch (_) {}
+                               
                             }
                         }
                 } catch (e) { /* ignore */ }

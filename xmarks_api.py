@@ -881,6 +881,57 @@ async def trigger_processing():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/api/bookmark/{tweet_id}")
+async def delete_bookmark(tweet_id: str, dry_run: bool = Query(False)):
+    """Delete a bookmark and all its associated artifacts"""
+    try:
+        # Import the delete function from xmarks.py
+        sys.path.insert(0, str(Path(__file__).parent))
+        from xmarks import delete_tweet_artifacts
+        
+        # Perform deletion
+        stats = delete_tweet_artifacts(tweet_id, dry_run)
+        
+        # Calculate totals
+        total_files = (
+            len(stats["tweet_files"]) + 
+            len(stats["thread_files"]) + 
+            len(stats["media_files"]) + 
+            len(stats["transcript_files"]) +
+            len(stats["cache_files"]) +
+            len(stats["pdf_files"]) +
+            len(stats["repo_files"])
+        )
+        
+        # Remove from processing queue if present
+        if not dry_run:
+            try:
+                db = get_metadata_db()
+                db.delete_bookmark_entry(tweet_id)
+            except Exception as e:
+                logger.warning(f"Failed to remove from bookmark queue: {e}")
+        
+        return {
+            "status": "ok" if not stats["errors"] else "partial",
+            "tweet_id": tweet_id,
+            "dry_run": dry_run,
+            "deleted": {
+                "total_files": total_files,
+                "tweet_files": len(stats["tweet_files"]),
+                "thread_files": len(stats["thread_files"]),
+                "media_files": len(stats["media_files"]),
+                "transcript_files": len(stats["transcript_files"]),
+                "cache_files": len(stats["cache_files"]),
+                "database_entries": stats["database_entries"]
+            },
+            "errors": stats["errors"][:10] if stats["errors"] else []
+        }
+        
+    except Exception as e:
+        logger.error(f"Error deleting bookmark {tweet_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/stats")
 async def get_stats():
     """Get processing statistics"""

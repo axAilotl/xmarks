@@ -10,7 +10,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Any
 
 # Add current directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -806,6 +806,210 @@ async def cmd_full(args):
     await cmd_process(_ensure_pipeline_defaults(args))
 
 
+def delete_tweet_artifacts(tweet_id: str, dry_run: bool = False) -> Dict[str, Any]:
+    """Delete all artifacts associated with a tweet
+    
+    Args:
+        tweet_id: The tweet ID to delete
+        dry_run: If True, only report what would be deleted without actually deleting
+        
+    Returns:
+        Dictionary with deletion statistics
+    """
+    stats = {
+        "tweet_files": [],
+        "thread_files": [],
+        "media_files": [],
+        "transcript_files": [],
+        "cache_files": [],
+        "pdf_files": [],
+        "repo_files": [],
+        "database_entries": 0,
+        "errors": []
+    }
+    
+    try:
+        vault_dir = Path(config.get("vault_dir", "knowledge_vault"))
+        cache_dir = Path(config.get("cache_dir", "graphql_cache"))
+        # Media dir is typically under vault_dir
+        media_dir = vault_dir / "media"
+        
+        # Find and delete tweet markdown files
+        tweet_pattern = f"tweets_{tweet_id}_*.md"
+        tweets_dir = vault_dir / "tweets"
+        if tweets_dir.exists():
+            for tweet_file in tweets_dir.glob(tweet_pattern):
+                stats["tweet_files"].append(str(tweet_file))
+                if not dry_run:
+                    try:
+                        tweet_file.unlink()
+                        logger.info(f"Deleted tweet file: {tweet_file}")
+                    except Exception as e:
+                        stats["errors"].append(f"Failed to delete {tweet_file}: {e}")
+        
+        # Find and delete thread files that include this tweet
+        thread_pattern = f"thread_{tweet_id}_*.md"
+        threads_dir = vault_dir / "threads"
+        if threads_dir.exists():
+            for thread_file in threads_dir.glob(thread_pattern):
+                stats["thread_files"].append(str(thread_file))
+                if not dry_run:
+                    try:
+                        thread_file.unlink()
+                        logger.info(f"Deleted thread file: {thread_file}")
+                    except Exception as e:
+                        stats["errors"].append(f"Failed to delete {thread_file}: {e}")
+        
+        # Find and delete media files (images, videos)
+        media_pattern = f"{tweet_id}_media_*"
+        if media_dir.exists():
+            for media_file in media_dir.glob(media_pattern):
+                stats["media_files"].append(str(media_file))
+                if not dry_run:
+                    try:
+                        media_file.unlink()
+                        logger.info(f"Deleted media file: {media_file}")
+                    except Exception as e:
+                        stats["errors"].append(f"Failed to delete {media_file}: {e}")
+        
+        # Find and delete transcript files
+        transcript_pattern = f"*_{tweet_id}_*.md"
+        transcripts_dir = vault_dir / "transcripts"
+        if transcripts_dir.exists():
+            for transcript_file in transcripts_dir.glob(transcript_pattern):
+                stats["transcript_files"].append(str(transcript_file))
+                if not dry_run:
+                    try:
+                        transcript_file.unlink()
+                        logger.info(f"Deleted transcript file: {transcript_file}")
+                    except Exception as e:
+                        stats["errors"].append(f"Failed to delete {transcript_file}: {e}")
+        
+        # Find and delete GraphQL cache files
+        cache_pattern = f"tweet_{tweet_id}_*.json"
+        if cache_dir.exists():
+            for cache_file in cache_dir.glob(cache_pattern):
+                stats["cache_files"].append(str(cache_file))
+                if not dry_run:
+                    try:
+                        cache_file.unlink()
+                        logger.info(f"Deleted cache file: {cache_file}")
+                    except Exception as e:
+                        stats["errors"].append(f"Failed to delete {cache_file}: {e}")
+        
+        # Delete from database if enabled
+        if config.get("database.enabled", False) and not dry_run:
+            try:
+                from core.metadata_db import get_metadata_db
+                db = get_metadata_db()
+                
+                # Delete tweet metadata
+                db.delete_tweet(tweet_id)
+                
+                # Delete from bookmark queue
+                db.delete_bookmark_entry(tweet_id)
+                
+                # Delete associated downloads
+                db.delete_downloads_for_context(f"tweet_{tweet_id}")
+                
+                # Delete LLM cache entries
+                db.delete_llm_cache_for_context(tweet_id)
+                
+                stats["database_entries"] = 1
+                logger.info(f"Deleted database entries for tweet {tweet_id}")
+                
+            except Exception as e:
+                stats["errors"].append(f"Database deletion error: {e}")
+        
+        # Delete from realtime bookmarks file
+        if not dry_run:
+            try:
+                realtime_file = Path("realtime_bookmarks.json")
+                if realtime_file.exists():
+                    with open(realtime_file, "r", encoding="utf-8") as f:
+                        bookmarks = json.load(f)
+                    
+                    original_count = len(bookmarks)
+                    bookmarks = [b for b in bookmarks if b.get("tweet_id") != tweet_id]
+                    
+                    if len(bookmarks) < original_count:
+                        with open(realtime_file, "w", encoding="utf-8") as f:
+                            json.dump(bookmarks, f, indent=2, ensure_ascii=False)
+                        logger.info(f"Removed tweet {tweet_id} from realtime bookmarks")
+                        
+            except Exception as e:
+                stats["errors"].append(f"Failed to update realtime bookmarks: {e}")
+        
+        return stats
+        
+    except Exception as e:
+        stats["errors"].append(f"General error: {e}")
+        return stats
+
+
+async def cmd_delete(args):
+    """Delete a tweet and all its associated artifacts"""
+    tweet_id = args.tweet_id
+    dry_run = args.dry_run
+    
+    print(f"🗑️ {'DRY RUN: ' if dry_run else ''}Deleting tweet {tweet_id}")
+    
+    stats = delete_tweet_artifacts(tweet_id, dry_run)
+    
+    # Print results
+    total_files = (
+        len(stats["tweet_files"]) + 
+        len(stats["thread_files"]) + 
+        len(stats["media_files"]) + 
+        len(stats["transcript_files"]) +
+        len(stats["cache_files"]) +
+        len(stats["pdf_files"]) +
+        len(stats["repo_files"])
+    )
+    
+    if dry_run:
+        print(f"\n📊 Would delete {total_files} files:")
+    else:
+        print(f"\n📊 Deleted {total_files} files:")
+    
+    if stats["tweet_files"]:
+        print(f"   📄 Tweet files: {len(stats['tweet_files'])}")
+    if stats["thread_files"]:
+        print(f"   🧵 Thread files: {len(stats['thread_files'])}")
+    if stats["media_files"]:
+        print(f"   🖼️ Media files: {len(stats['media_files'])}")
+    if stats["transcript_files"]:
+        print(f"   📝 Transcript files: {len(stats['transcript_files'])}")
+    if stats["cache_files"]:
+        print(f"   💾 Cache files: {len(stats['cache_files'])}")
+    if stats["database_entries"] and not dry_run:
+        print(f"   🗄️ Database entries: {stats['database_entries']}")
+    
+    if args.verbose and total_files > 0:
+        print("\nDeleted files:")
+        for category, files in [
+            ("Tweet", stats["tweet_files"]),
+            ("Thread", stats["thread_files"]),
+            ("Media", stats["media_files"]),
+            ("Transcript", stats["transcript_files"]),
+            ("Cache", stats["cache_files"])
+        ]:
+            for file in files[:5]:  # Show first 5 of each type
+                print(f"   {category}: {Path(file).name}")
+            if len(files) > 5:
+                print(f"   ... and {len(files) - 5} more {category.lower()} files")
+    
+    if stats["errors"]:
+        print(f"\n❌ Errors ({len(stats['errors'])}):")
+        for error in stats["errors"][:5]:
+            print(f"   {error}")
+        if len(stats["errors"]) > 5:
+            print(f"   ... and {len(stats['errors']) - 5} more errors")
+    
+    if dry_run:
+        print("\n💡 Run without --dry-run to actually delete these files")
+
+
 def cmd_stats(args):
     """Show statistics about cached data and processed files"""
     print("📊 XMarks Statistics")
@@ -1340,6 +1544,15 @@ Examples:
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="Show statistics")
 
+    # Delete command
+    delete_parser = subparsers.add_parser("delete", help="Delete a tweet and all its artifacts")
+    delete_parser.add_argument("tweet_id", help="Tweet ID to delete")
+    delete_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be deleted without actually deleting",
+    )
+
     # Database management command
     db_parser = subparsers.add_parser("db", help="Database management operations")
     db_subparsers = db_parser.add_subparsers(dest="db_action", help="Database actions")
@@ -1419,6 +1632,8 @@ Examples:
             asyncio.run(cmd_full(args))
         elif args.command == "stats":
             cmd_stats(args)
+        elif args.command == "delete":
+            asyncio.run(cmd_delete(args))
         elif args.command == "db":
             asyncio.run(cmd_database(args))
         elif args.command == "migrate-filenames":
