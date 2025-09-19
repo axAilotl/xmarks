@@ -103,5 +103,19 @@
       "additionalProperties": true
     }
   },
-  "required": ["llm"]
+  "required": ["llm"],
+  "paths": {
+    "type": "object",
+    "properties": {
+      "vault_dir": { "type": "string" },
+      "cache_dir": { "type": "string" },
+      "images_dir": { "type": "string" },
+      "videos_dir": { "type": "string" },
+      "media_dir": { "type": "string" },
+      "system_dir": { "type": "string" },
+      "bookmarks_file": { "type": "string" },
+      "cookies_file": { "type": "string" }
+    },
+    "additionalProperties": false
+  }
 }

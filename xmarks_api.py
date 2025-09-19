@@ -261,7 +261,14 @@ class BookmarkStatusRequest(BaseModel):
 
 
 # Storage
-REALTIME_BOOKMARKS_FILE = Path("realtime_bookmarks.json")
+def get_realtime_bookmarks_file():
+    """Get the path to the realtime bookmarks file, using system_dir if configured"""
+    system_dir = config.get('system_dir')
+    if system_dir:
+        return Path(system_dir) / "realtime_bookmarks.json"
+    return Path("realtime_bookmarks.json")
+
+REALTIME_BOOKMARKS_FILE = get_realtime_bookmarks_file()
 PROCESSING_QUEUE = asyncio.Queue()
 BOOKMARKS_FILE_LOCK = asyncio.Lock()
 

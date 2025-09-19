@@ -109,7 +109,7 @@ class Config:
         """Lift values from paths.* to top-level keys for backward compatibility."""
         paths = self.get('paths', {})
         if isinstance(paths, dict):
-            for key in ['bookmarks_file', 'cookies_file', 'cache_dir', 'media_dir', 'vault_dir']:
+            for key in ['bookmarks_file', 'cookies_file', 'cache_dir', 'images_dir', 'videos_dir', 'media_dir', 'vault_dir', 'system_dir']:
                 if key not in self.data and key in paths:
                     self.data[key] = paths[key]
     
@@ -129,7 +129,7 @@ class Config:
                 errors.append(f"Required file missing: {file_path} (config key: {file_key})")
         
         # Check directories can be created
-        required_dirs = ['cache_dir', 'vault_dir', 'media_dir']
+        required_dirs = ['cache_dir', 'vault_dir', 'images_dir', 'videos_dir', 'media_dir', 'system_dir']
         for dir_key in required_dirs:
             value = self.get(dir_key) or self.get(f'paths.{dir_key}')
             if not value:

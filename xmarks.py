@@ -63,8 +63,12 @@ def setup_logging(verbose: bool = False):
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
 
-    # File handler
-    log_file = Path("xmarks.log")
+    # File handler - use system_dir if available
+    system_dir = config.get('system_dir')
+    if system_dir:
+        log_file = Path(system_dir) / "xmarks.log"
+    else:
+        log_file = Path("xmarks.log")
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
@@ -860,15 +864,50 @@ def delete_tweet_artifacts(tweet_id: str, dry_run: bool = False) -> Dict[str, An
                     except Exception as e:
                         stats["errors"].append(f"Failed to delete {thread_file}: {e}")
         
-        # Find and delete media files (images, videos)
+        # Find and delete media files (images, videos) from both directories
         media_pattern = f"{tweet_id}_media_*"
-        if media_dir.exists():
-            for media_file in media_dir.glob(media_pattern):
+        
+        # Check images directory (handle absolute vs relative paths)
+        images_path = config.get("paths.images_dir", "images")
+        if Path(images_path).is_absolute():
+            images_dir = Path(images_path)
+        else:
+            images_dir = vault_dir / images_path
+        if images_dir.exists():
+            for media_file in images_dir.glob(media_pattern):
                 stats["media_files"].append(str(media_file))
                 if not dry_run:
                     try:
                         media_file.unlink()
-                        logger.info(f"Deleted media file: {media_file}")
+                        logger.info(f"Deleted image file: {media_file}")
+                    except Exception as e:
+                        stats["errors"].append(f"Failed to delete {media_file}: {e}")
+        
+        # Check videos directory (handle absolute vs relative paths)
+        videos_path = config.get("paths.videos_dir", "videos")
+        if Path(videos_path).is_absolute():
+            videos_dir = Path(videos_path)
+        else:
+            videos_dir = vault_dir / videos_path
+        if videos_dir.exists():
+            for media_file in videos_dir.glob(media_pattern):
+                stats["media_files"].append(str(media_file))
+                if not dry_run:
+                    try:
+                        media_file.unlink()
+                        logger.info(f"Deleted video file: {media_file}")
+                    except Exception as e:
+                        stats["errors"].append(f"Failed to delete {media_file}: {e}")
+        
+        # Also check legacy media directory for backward compatibility
+        legacy_media_dir = vault_dir / "media"
+        if legacy_media_dir.exists():
+            for media_file in legacy_media_dir.glob(media_pattern):
+                stats["media_files"].append(str(media_file))
+                if not dry_run:
+                    try:
+                        media_file.unlink()
+                        logger.info(f"Deleted legacy media file: {media_file}")
                     except Exception as e:
                         stats["errors"].append(f"Failed to delete {media_file}: {e}")
         
@@ -924,7 +963,13 @@ def delete_tweet_artifacts(tweet_id: str, dry_run: bool = False) -> Dict[str, An
         # Delete from realtime bookmarks file
         if not dry_run:
             try:
-                realtime_file = Path("realtime_bookmarks.json")
+                # Use system_dir if available, fallback to current directory
+                system_dir = config.get('system_dir')
+                if system_dir:
+                    realtime_file = Path(system_dir) / "realtime_bookmarks.json"
+                else:
+                    realtime_file = Path("realtime_bookmarks.json")
+                    
                 if realtime_file.exists():
                     with open(realtime_file, "r", encoding="utf-8") as f:
                         bookmarks = json.load(f)
@@ -1060,10 +1105,38 @@ def cmd_stats(args):
                         f"     {file_type:12} {stats.get('count', 0):,} files ({size_mb} MB)"
                     )
 
-    media_dir = Path(config.get("media_dir"))
-    if media_dir.exists():
-        media_files = len(list(media_dir.glob("*")))
-        print(f"🖼️ Media Files: {media_files}")
+    # Check both new media directories and legacy
+    vault_dir = Path(config.get("vault_dir", "knowledge_vault"))
+    
+    # Handle absolute vs relative paths for images
+    images_path = config.get("images_dir", "images")
+    if Path(images_path).is_absolute():
+        images_dir = Path(images_path)
+    else:
+        images_dir = vault_dir / images_path
+    
+    # Handle absolute vs relative paths for videos
+    videos_path = config.get("videos_dir", "videos")
+    if Path(videos_path).is_absolute():
+        videos_dir = Path(videos_path)
+    else:
+        videos_dir = vault_dir / videos_path
+    
+    # Legacy media is always relative to vault
+    legacy_media_dir = vault_dir / config.get("media_dir", "media")
+    
+    image_files = len(list(images_dir.glob("*"))) if images_dir.exists() else 0
+    video_files = len(list(videos_dir.glob("*"))) if videos_dir.exists() else 0
+    legacy_media_files = len(list(legacy_media_dir.glob("*"))) if legacy_media_dir.exists() else 0
+    
+    total_media_files = image_files + video_files + legacy_media_files
+    print(f"🖼️ Media Files: {total_media_files} total")
+    if image_files > 0:
+        print(f"   📸 Images: {image_files}")
+    if video_files > 0:
+        print(f"   🎬 Videos: {video_files}")
+    if legacy_media_files > 0:
+        print(f"   📁 Legacy media: {legacy_media_files}")
 
     if db:
         download_summary = db.get_download_summary()

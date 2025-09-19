@@ -36,14 +36,36 @@ register_pipeline_stages(*PIPELINE_STAGES)
 class MediaProcessor:
     """Handles media downloads and Obsidian linking"""
     
-    def __init__(self, media_dir: str = None):
-        if media_dir:
-            self.media_dir = Path(media_dir)
+    def __init__(self, images_dir: str = None, videos_dir: str = None):
+        # Set up separate directories for images and videos
+        vault_dir = Path(config.get('vault_dir', 'knowledge_vault'))
+        
+        if images_dir:
+            self.images_dir = Path(images_dir)
         else:
-            # Media should be inside knowledge_vault
-            vault_dir = Path(config.get('vault_dir', 'knowledge_vault'))
-            self.media_dir = vault_dir / 'media'
-        self.media_dir.mkdir(parents=True, exist_ok=True)
+            # Check if images_dir is an absolute path, otherwise make it relative to vault
+            images_path = config.get('paths.images_dir', 'images')
+            if Path(images_path).is_absolute():
+                self.images_dir = Path(images_path)
+            else:
+                self.images_dir = vault_dir / images_path
+        
+        if videos_dir:
+            self.videos_dir = Path(videos_dir)
+        else:
+            # Check if videos_dir is an absolute path, otherwise make it relative to vault
+            videos_path = config.get('paths.videos_dir', 'videos')
+            if Path(videos_path).is_absolute():
+                self.videos_dir = Path(videos_path)
+            else:
+                self.videos_dir = vault_dir / videos_path
+            
+        # Create directories
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.videos_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Keep media_dir for backward compatibility (legacy single directory)
+        self.media_dir = vault_dir / config.get('paths.media_dir', 'media')
         
         # Session for efficient HTTP requests
         self.session = requests.Session()
@@ -156,11 +178,17 @@ class MediaProcessor:
             
             # Generate filename with new standard naming
             if is_thumbnail and media_item.media_type in ['video', 'animated_gif']:
-                # For video thumbnails, add _thumb suffix
+                # For video thumbnails, add _thumb suffix and save to images dir
                 filename = self._generate_filename(url, 'photo', tweet_id, post_num, file_num, suffix='_thumb')
-            else:
+                filepath = self.images_dir / filename
+            elif media_item.media_type in ['photo']:
+                # Images go to images directory
                 filename = self._generate_filename(url, media_item.media_type, tweet_id, post_num, file_num)
-            filepath = self.media_dir / filename
+                filepath = self.images_dir / filename
+            else:
+                # Other media types (videos, gifs) go to videos directory
+                filename = self._generate_filename(url, media_item.media_type, tweet_id, post_num, file_num)
+                filepath = self.videos_dir / filename
             
             # Skip if already exists (unless force)
             if filepath.exists() and not force_download:
@@ -284,9 +312,9 @@ class MediaProcessor:
             # Record pending download
             self.download_tracker.record_pending(url)
             
-            # Generate video filename
+            # Generate video filename - videos go to videos directory
             filename = self._generate_filename(url, media_item.media_type, tweet_id, post_num, file_num)
-            filepath = self.media_dir / filename
+            filepath = self.videos_dir / filename
             
             # Skip if already exists (unless force)
             if filepath.exists() and not force_download:
@@ -441,10 +469,20 @@ class MediaProcessor:
     
     def get_statistics(self) -> Dict:
         """Get media processing statistics"""
-        media_files = list(self.media_dir.glob("*")) if self.media_dir.exists() else []
+        image_files = list(self.images_dir.glob("*")) if self.images_dir.exists() else []
+        video_files = list(self.videos_dir.glob("*")) if self.videos_dir.exists() else []
+        
+        total_files = len(image_files) + len(video_files)
+        total_size = (sum(f.stat().st_size for f in image_files if f.is_file()) + 
+                     sum(f.stat().st_size for f in video_files if f.is_file())) / (1024*1024)
         
         return {
-            'total_media_files': len(media_files),
-            'media_directory': str(self.media_dir),
-            'directory_size_mb': sum(f.stat().st_size for f in media_files if f.is_file()) / (1024*1024)
+            'total_media_files': total_files,
+            'image_files': len(image_files),
+            'video_files': len(video_files),
+            'images_directory': str(self.images_dir),
+            'videos_directory': str(self.videos_dir),
+            'total_size_mb': total_size,
+            'images_size_mb': sum(f.stat().st_size for f in image_files if f.is_file()) / (1024*1024),
+            'videos_size_mb': sum(f.stat().st_size for f in video_files if f.is_file()) / (1024*1024)
         }

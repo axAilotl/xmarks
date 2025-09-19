@@ -36,7 +36,15 @@ class DownloadTracker:
     """Manages download tracking across all file types (media, PDFs, etc.)"""
     
     def __init__(self, tracking_file: str = None):
-        self.tracking_file = Path(tracking_file or 'download_tracking.json')
+        if tracking_file:
+            self.tracking_file = Path(tracking_file)
+        else:
+            # Use system_dir if available, fallback to current directory
+            system_dir = config.get('system_dir')
+            if system_dir:
+                self.tracking_file = Path(system_dir) / 'download_tracking.json'
+            else:
+                self.tracking_file = Path('download_tracking.json')
         self._downloads: Dict[str, DownloadRecord] = {}
         self._load_tracking_data()
     

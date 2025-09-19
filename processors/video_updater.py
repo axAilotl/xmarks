@@ -307,10 +307,44 @@ class VideoUpdater:
                 video_ratio = stats['cache_files_with_videos'] / sample_size
                 stats['total_tweets_with_videos'] = int(len(cache_files) * video_ratio)
         
-        # Count video and thumbnail files in media directory
-        media_dir = self.vault_dir / 'media'
-        if media_dir.exists():
-            for media_file in media_dir.glob('*'):
+        # Count video and thumbnail files in both new directories and legacy media directory
+        from core.config import config
+        
+        # Check new videos directory (handle absolute vs relative paths)
+        videos_path = config.get('paths.videos_dir', 'videos')
+        if Path(videos_path).is_absolute():
+            videos_dir = Path(videos_path)
+        else:
+            videos_dir = self.vault_dir / videos_path
+        if videos_dir.exists():
+            for media_file in videos_dir.glob('*'):
+                if media_file.is_file():
+                    file_size = media_file.stat().st_size
+                    if media_file.suffix == '.mp4':
+                        stats['total_video_files'] += 1
+                        stats['video_files_size_mb'] += file_size / (1024 * 1024)
+                    elif '_thumb' in media_file.name:
+                        stats['total_thumbnail_files'] += 1
+                        stats['thumbnail_files_size_mb'] += file_size / (1024 * 1024)
+        
+        # Check new images directory for thumbnails (handle absolute vs relative paths)
+        images_path = config.get('paths.images_dir', 'images')
+        if Path(images_path).is_absolute():
+            images_dir = Path(images_path)
+        else:
+            images_dir = self.vault_dir / images_path
+        if images_dir.exists():
+            for media_file in images_dir.glob('*'):
+                if media_file.is_file():
+                    file_size = media_file.stat().st_size
+                    if '_thumb' in media_file.name:
+                        stats['total_thumbnail_files'] += 1
+                        stats['thumbnail_files_size_mb'] += file_size / (1024 * 1024)
+        
+        # Check legacy media directory for backward compatibility
+        legacy_media_dir = self.vault_dir / 'media'
+        if legacy_media_dir.exists():
+            for media_file in legacy_media_dir.glob('*'):
                 if media_file.is_file():
                     file_size = media_file.stat().st_size
                     if media_file.suffix == '.mp4':

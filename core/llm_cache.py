@@ -19,8 +19,16 @@ class LLMCache:
     """Simple disk-based cache for LLM results"""
     
     def __init__(self, cache_dir: str = None):
-        vault_dir = Path(config.get('vault_dir', 'knowledge_vault'))
-        self.cache_dir = vault_dir / (cache_dir or '.llm_cache')
+        if cache_dir:
+            self.cache_dir = Path(cache_dir)
+        else:
+            # Use system_dir if available, fallback to vault_dir/.llm_cache
+            system_dir = config.get('system_dir')
+            if system_dir:
+                self.cache_dir = Path(system_dir) / 'llm_cache'
+            else:
+                vault_dir = Path(config.get('vault_dir', 'knowledge_vault'))
+                self.cache_dir = vault_dir / '.llm_cache'
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         # Cache stats
