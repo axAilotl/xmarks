@@ -191,9 +191,13 @@ Configure ntfy in `config.json`:
 ```json
 "ntfy": {
   "server": "https://ntfy.example.com",
-  "topic": "xmarks"
+  "topic": "xmarks",
+  "user": "your-username",
+  "password": "your-password"
 }
 ```
+
+Or via environment variables: `NTFY_SERVER`, `NTFY_USER`, `NTFY_PASS`
 
 ---
 
