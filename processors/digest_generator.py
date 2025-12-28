@@ -197,8 +197,91 @@ class DigestGenerator:
         except Exception:
             return filepath.stem
 
+    def extract_summary_from_content(self, filepath: Path) -> Optional[str]:
+        """Extract the LLM-generated summary from the markdown content"""
+        try:
+            content = filepath.read_text(encoding='utf-8')
+            # Skip frontmatter
+            if content.startswith('---'):
+                end_idx = content.find('---', 3)
+                if end_idx != -1:
+                    content = content[end_idx + 3:].strip()
+
+            # Look for ## Summary section
+            lines = content.split('\n')
+            in_summary = False
+            summary_lines = []
+
+            for line in lines:
+                if line.strip().startswith('## Summary'):
+                    in_summary = True
+                    continue
+                elif in_summary:
+                    # Stop at next heading or empty section
+                    if line.strip().startswith('## ') or line.strip().startswith('# '):
+                        break
+                    if line.strip():
+                        summary_lines.append(line.strip())
+
+            if summary_lines:
+                return ' '.join(summary_lines)[:300]
+
+            return None
+        except Exception:
+            return None
+
+    def extract_first_paragraph(self, filepath: Path) -> Optional[str]:
+        """Extract the first paragraph of actual content (tweet text)"""
+        try:
+            content = filepath.read_text(encoding='utf-8')
+            # Skip frontmatter
+            if content.startswith('---'):
+                end_idx = content.find('---', 3)
+                if end_idx != -1:
+                    content = content[end_idx + 3:].strip()
+
+            lines = content.split('\n')
+            paragraph_lines = []
+
+            for line in lines:
+                stripped = line.strip()
+                # Skip headings, empty lines at start, and special sections
+                if stripped.startswith('#'):
+                    if paragraph_lines:  # Already got content, stop at heading
+                        break
+                    continue
+                if stripped.startswith('![['):  # Skip media embeds
+                    continue
+                if stripped.startswith('*') and stripped.endswith('*'):  # Skip alt text
+                    continue
+                if stripped.startswith('>'):  # Skip callouts
+                    continue
+                if stripped.startswith('```'):  # Skip code blocks
+                    continue
+                if stripped.startswith('---'):  # Skip dividers
+                    if paragraph_lines:
+                        break
+                    continue
+
+                if stripped:
+                    paragraph_lines.append(stripped)
+                    if len(' '.join(paragraph_lines)) > 200:
+                        break
+                elif paragraph_lines:
+                    break  # Empty line after content = end of paragraph
+
+            if paragraph_lines:
+                text = ' '.join(paragraph_lines)
+                if len(text) > 200:
+                    text = text[:200] + '...'
+                return text
+
+            return None
+        except Exception:
+            return None
+
     def parse_date(self, date_str: str) -> Optional[datetime]:
-        """Parse various date formats from frontmatter"""
+        """Parse various date formats from frontmatter, returning naive datetime"""
         if not date_str:
             return None
 
@@ -212,14 +295,22 @@ class DigestGenerator:
 
         for fmt in formats:
             try:
-                return datetime.strptime(date_str, fmt)
+                dt = datetime.strptime(date_str, fmt)
+                # Convert to naive datetime for consistent comparison
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+                return dt
             except ValueError:
                 continue
 
         # Try parsing with dateutil if available
         try:
             from dateutil import parser
-            return parser.parse(date_str)
+            dt = parser.parse(date_str)
+            # Convert to naive datetime
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
         except Exception:
             pass
 
@@ -238,11 +329,19 @@ class DigestGenerator:
             for md_file in self.tweets_dir.glob("*.md"):
                 fm = self.parse_frontmatter(md_file)
                 if fm:
+                    # Extract summary: prefer LLM summary, fallback to first paragraph
+                    summary = self.extract_summary_from_content(md_file)
+                    if not summary:
+                        summary = self.extract_first_paragraph(md_file)
+
                     item = DigestItem(
                         filepath=md_file,
                         frontmatter=fm,
                         title=self.extract_title_from_content(md_file)
                     )
+                    # Store summary in frontmatter for easy access
+                    if summary:
+                        item.frontmatter['_summary'] = summary
 
                     # Filter by date if specified
                     if start_date or end_date:
@@ -260,11 +359,18 @@ class DigestGenerator:
             for md_file in self.threads_dir.glob("*.md"):
                 fm = self.parse_frontmatter(md_file)
                 if fm:
+                    # Extract summary for threads
+                    summary = self.extract_summary_from_content(md_file)
+                    if not summary:
+                        summary = self.extract_first_paragraph(md_file)
+
                     item = DigestItem(
                         filepath=md_file,
                         frontmatter=fm,
                         title=self.extract_title_from_content(md_file)
                     )
+                    if summary:
+                        item.frontmatter['_summary'] = summary
 
                     # Filter by date
                     if start_date or end_date:
@@ -420,10 +526,16 @@ class DigestGenerator:
             for item in categories['papers'][:limit_per_category]:
                 fm = item.frontmatter
                 likes = fm.get('likes', 0)
-                lines.append(f"- {item.obsidian_link} - @{item.author}")
-                if likes:
-                    lines.append(f"  - {likes:,} likes | importance: {item.importance}")
-            lines.append("")
+                tags = fm.get('tags', [])
+                summary = fm.get('_summary', '')
+
+                lines.append(f"### {item.obsidian_link}")
+                lines.append(f"**@{item.author}** · {likes:,} likes")
+                if summary:
+                    lines.append(f"> {summary}")
+                if tags:
+                    lines.append(f"Tags: {' '.join(['#' + t for t in tags[:5]])}")
+                lines.append("")
 
         # Repos section
         if categories['repos']:
@@ -432,10 +544,16 @@ class DigestGenerator:
             for item in categories['repos'][:limit_per_category]:
                 fm = item.frontmatter
                 likes = fm.get('likes', 0)
-                lines.append(f"- {item.obsidian_link} - @{item.author}")
-                if likes:
-                    lines.append(f"  - {likes:,} likes | importance: {item.importance}")
-            lines.append("")
+                tags = fm.get('tags', [])
+                summary = fm.get('_summary', '')
+
+                lines.append(f"### {item.obsidian_link}")
+                lines.append(f"**@{item.author}** · {likes:,} likes")
+                if summary:
+                    lines.append(f"> {summary}")
+                if tags:
+                    lines.append(f"Tags: {' '.join(['#' + t for t in tags[:5]])}")
+                lines.append("")
 
         # Threads section
         if categories['threads']:
@@ -444,35 +562,71 @@ class DigestGenerator:
             for item in categories['threads'][:limit_per_category]:
                 fm = item.frontmatter
                 tweet_count = fm.get('tweet_count', 0)
-                lines.append(f"- {item.obsidian_link} - @{item.author} ({tweet_count} tweets)")
-                lines.append(f"  - {fm.get('likes', 0):,} total likes | importance: {item.importance}")
-            lines.append("")
+                likes = fm.get('likes', 0)
+                tags = fm.get('tags', [])
+                summary = fm.get('_summary', '')
+
+                lines.append(f"### {item.obsidian_link}")
+                lines.append(f"**@{item.author}** · {tweet_count} tweets · {likes:,} likes")
+                if summary:
+                    lines.append(f"> {summary}")
+                if tags:
+                    lines.append(f"Tags: {' '.join(['#' + t for t in tags[:5]])}")
+                lines.append("")
 
         # YouTube section
         if categories['youtube']:
             lines.append("## YouTube Videos")
             lines.append("")
             for item in categories['youtube'][:limit_per_category]:
-                lines.append(f"- {item.obsidian_link} - @{item.author}")
-            lines.append("")
+                fm = item.frontmatter
+                likes = fm.get('likes', 0)
+                tags = fm.get('tags', [])
+                summary = fm.get('_summary', '')
+
+                lines.append(f"### {item.obsidian_link}")
+                lines.append(f"**@{item.author}** · {likes:,} likes")
+                if summary:
+                    lines.append(f"> {summary}")
+                if tags:
+                    lines.append(f"Tags: {' '.join(['#' + t for t in tags[:5]])}")
+                lines.append("")
 
         # Videos section (Twitter videos)
         if categories['videos']:
             lines.append("## Twitter Videos")
             lines.append("")
             for item in categories['videos'][:limit_per_category]:
-                lines.append(f"- {item.obsidian_link} - @{item.author}")
-            lines.append("")
+                fm = item.frontmatter
+                likes = fm.get('likes', 0)
+                tags = fm.get('tags', [])
+                summary = fm.get('_summary', '')
 
-        # High engagement tweets
+                lines.append(f"### {item.obsidian_link}")
+                lines.append(f"**@{item.author}** · {likes:,} likes")
+                if summary:
+                    lines.append(f"> {summary}")
+                if tags:
+                    lines.append(f"Tags: {' '.join(['#' + t for t in tags[:5]])}")
+                lines.append("")
+
+        # High engagement tweets (only if we have some good ones)
         high_engagement = [i for i in categories['tweets'] if i.likes >= 100]
         if high_engagement:
-            lines.append("## High Engagement Tweets")
+            lines.append("## Notable Tweets")
             lines.append("")
             for item in high_engagement[:limit_per_category]:
-                lines.append(f"- {item.obsidian_link} - @{item.author}")
-                lines.append(f"  - {item.likes:,} likes | importance: {item.importance}")
-            lines.append("")
+                fm = item.frontmatter
+                tags = fm.get('tags', [])
+                summary = fm.get('_summary', '')
+
+                lines.append(f"### {item.obsidian_link}")
+                lines.append(f"**@{item.author}** · {item.likes:,} likes")
+                if summary:
+                    lines.append(f"> {summary}")
+                if tags:
+                    lines.append(f"Tags: {' '.join(['#' + t for t in tags[:5]])}")
+                lines.append("")
 
         # Tag cloud
         if stats.top_tags:
