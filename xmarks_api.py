@@ -1427,7 +1427,7 @@ async def shutdown_event():
 def main():
     """Run the API server"""
     uvicorn.run(
-        "xmarks_api:app", host="0.0.0.0", port=8000, reload=True, log_level="info"
+        "xmarks_api:app", host="0.0.0.0", port=8001, reload=True, log_level="info"
     )
 
 

@@ -64,6 +64,7 @@ Enable the backend in `config.json` under `"whisper"` (or use `"deepgram"` if yo
 | `github-stars` / `huggingface-likes` | Summarise starred/liked repos. | `--limit`, `--resume`, `--include-*` |
 | `db` | Inspect or vacuum the SQLite database. | `db stats`, `db vacuum`, `db export` |
 | `migrate-filenames` | Normalise filenames/backlinks in the vault. | `--dry-run`, `--analyze` |
+| `migrate-frontmatter` | Update existing files with Dataview-compatible frontmatter. | `--dry-run` |
 | `full` | Run complete pipeline: download + process. | `--limit`, `--resume` |
 
 \*`--dry-run` works with `--use-cache` and prints a plan without touching the filesystem.
@@ -198,6 +199,33 @@ Configure ntfy in `config.json`:
 ```
 
 Or via environment variables: `NTFY_SERVER`, `NTFY_USER`, `NTFY_PASS`
+
+### Dataview Path Configuration
+
+If your `knowledge_vault/` is a subfolder within your Obsidian vault (not the vault root), configure the path prefix:
+
+```json
+"dataview": {
+  "path_prefix": "knowledge_vault"
+}
+```
+
+Set to `""` (empty string) if `tweets/` and `threads/` are at the vault root.
+
+### Migrating Existing Content
+
+If you have existing markdown files without the enhanced frontmatter fields:
+
+```bash
+# Preview what would be updated
+python xmarks.py migrate-frontmatter --dry-run
+
+# Run the migration (pulls engagement data from GraphQL cache)
+python xmarks.py migrate-frontmatter
+
+# Regenerate digests with new data
+python xmarks.py digest all
+```
 
 ---
 
