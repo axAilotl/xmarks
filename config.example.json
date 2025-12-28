@@ -379,10 +379,17 @@
     "chunk_duration_minutes": 10,
     "min_duration_seconds": 60
   },
+  "ntfy": {
+    "server": "",
+    "topic": "xmarks",
+    "user": "",
+    "password": ""
+  },
   "paths": {
     "vault_dir": "knowledge_vault",
     "cache_dir": "graphql_cache",
     "media_dir": "media",
+    "digests_dir": "_digests",
     "bookmarks_file": "twitter-bookmarks-merged.json",
     "cookies_file": "twitter_cookies.json"
   }
