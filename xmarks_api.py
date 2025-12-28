@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Callable
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import uvicorn
+import os
 
 # Add current directory to path for imports
 import sys
@@ -34,6 +37,11 @@ logger = logging.getLogger(__name__)
 
 # FastAPI app
 app = FastAPI(title="XMarks API", version="1.0.0")
+
+# Mount static files for settings UI
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # Shared pipeline instance protected by an asyncio lock to avoid overlapping runs
 pipeline_runner = PipelineProcessor()
@@ -260,6 +268,14 @@ class BookmarkStatusRequest(BaseModel):
     tweet_ids: List[str]
 
 
+class DigestRequest(BaseModel):
+    """Request payload for generating digests."""
+
+    digest_type: str = "all"  # weekly, inbox, dashboard, all
+    week: Optional[str] = None  # Format: YYYY-WNN (e.g., 2024-W52)
+    notify: bool = False
+
+
 # Storage
 def get_realtime_bookmarks_file():
     """Get the path to the realtime bookmarks file, using system_dir if configured"""
@@ -267,6 +283,29 @@ def get_realtime_bookmarks_file():
     if system_dir:
         return Path(system_dir) / "realtime_bookmarks.json"
     return Path("realtime_bookmarks.json")
+
+
+def save_graphql_to_cache(tweet_id: str, graphql_response: dict) -> str:
+    """Save GraphQL response to cache and return filename.
+
+    Consolidates the repeated GraphQL caching logic into one place.
+    """
+    import re
+    # Validate tweet_id to prevent path traversal
+    if not tweet_id or not re.match(r'^\d+$', tweet_id):
+        raise ValueError(f"Invalid tweet_id format: {tweet_id}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    cache_filename = f"tweet_{tweet_id}_{timestamp}.json"
+    cache_path = Path("graphql_cache") / cache_filename
+    cache_path.parent.mkdir(exist_ok=True)
+
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(graphql_response, f, indent=2, ensure_ascii=False)
+
+    logger.info(f"Cached GraphQL response for {tweet_id}")
+    return cache_filename
+
 
 REALTIME_BOOKMARKS_FILE = get_realtime_bookmarks_file()
 PROCESSING_QUEUE = asyncio.Queue()
@@ -279,7 +318,11 @@ def load_realtime_bookmarks() -> list:
         try:
             with open(REALTIME_BOOKMARKS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse realtime bookmarks JSON: {e}")
+            return []
+        except IOError as e:
+            logger.error(f"Failed to read realtime bookmarks file: {e}")
             return []
     return []
 
@@ -514,6 +557,223 @@ async def health_check():
     return {"status": "healthy", "service": "XMarks API"}
 
 
+@app.get("/settings")
+async def settings_page():
+    """Serve the settings UI page"""
+    settings_file = Path(__file__).parent / "static" / "settings.html"
+    if settings_file.exists():
+        return FileResponse(settings_file)
+    raise HTTPException(status_code=404, detail="Settings page not found")
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get current configuration (API keys are masked)"""
+    try:
+        # Load current config.json
+        config_path = Path(__file__).parent / "config.json"
+        config_data = {}
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config_data = json.load(f)
+
+        # Check which env vars are set (masked)
+        env_status = {
+            'OPENAI_API_KEY': bool(os.getenv('OPENAI_API_KEY')),
+            'ANTHROPIC_API': bool(os.getenv('ANTHROPIC_API')),
+            'OPEN_ROUTER_API_KEY': bool(os.getenv('OPEN_ROUTER_API_KEY')),
+            'YOUTUBE_API_KEY': bool(os.getenv('YOUTUBE_API_KEY')),
+            'DEEPGRAM_API_KEY': bool(os.getenv('DEEPGRAM_API_KEY')),
+            'GITHUB_API': bool(os.getenv('GITHUB_API')),
+            'HF_USER': os.getenv('HF_USER', '')
+        }
+
+        return {
+            **config_data,
+            'env': env_status
+        }
+    except Exception as e:
+        logger.error(f"Error loading settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/config")
+async def update_config(updates: Dict[str, Any]):
+    """Update config.json with new settings (deep merge)"""
+    try:
+        config_path = Path(__file__).parent / "config.json"
+
+        # Load existing config
+        config_data = {}
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config_data = json.load(f)
+
+        # Deep merge updates into config
+        def deep_merge(base: dict, override: dict) -> dict:
+            result = base.copy()
+            for key, value in override.items():
+                if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = deep_merge(result[key], value)
+                else:
+                    result[key] = value
+            return result
+
+        config_data = deep_merge(config_data, updates)
+
+        # Write back
+        with open(config_path, 'w') as f:
+            json.dump(config_data, f, indent=2)
+
+        # Reload config in memory
+        config.load_from_file(str(config_path))
+
+        logger.info("Configuration updated via settings UI")
+        return {"status": "ok", "message": "Configuration updated"}
+
+    except Exception as e:
+        logger.error(f"Error updating config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/env")
+async def update_env_vars(env_updates: Dict[str, str]):
+    """Update .env file with new API keys"""
+    try:
+        env_path = Path(__file__).parent / ".env"
+
+        # Load existing .env content
+        existing_vars = {}
+        if env_path.exists():
+            with open(env_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        existing_vars[key.strip()] = value.strip()
+
+        # Update with new values (only if provided and non-empty)
+        for key, value in env_updates.items():
+            if value and value.strip():
+                existing_vars[key] = value.strip()
+                # Also update current environment
+                os.environ[key] = value.strip()
+
+        # Write back to .env
+        with open(env_path, 'w') as f:
+            f.write("# XMarks API Keys\n")
+            f.write("# Updated by settings UI\n\n")
+            for key, value in existing_vars.items():
+                # Quote values that might have special characters
+                if ' ' in value or '"' in value:
+                    f.write(f'{key}="{value}"\n')
+                else:
+                    f.write(f'{key}={value}\n')
+
+        logger.info("Environment variables updated via settings UI")
+        return {"status": "ok", "message": "API keys updated"}
+
+    except Exception as e:
+        logger.error(f"Error updating env vars: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ProviderModelsRequest(BaseModel):
+    type: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+@app.post("/api/providers/{provider_name}/models")
+async def fetch_provider_models(provider_name: str, request: ProviderModelsRequest):
+    """Fetch available models from a provider API"""
+    try:
+        import httpx
+
+        provider_type = request.type
+        api_key = request.api_key
+        base_url = request.base_url
+        models = []
+
+        if provider_type == 'openai':
+            if not api_key:
+                api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                raise HTTPException(status_code=400, detail="OpenAI API key required")
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                data = response.json()
+                # Filter to chat models
+                models = sorted([
+                    m['id'] for m in data.get('data', [])
+                    if 'gpt' in m['id'].lower() or 'o1' in m['id'].lower() or 'o3' in m['id'].lower()
+                ])
+
+        elif provider_type == 'anthropic':
+            # Anthropic doesn't have a models list API, return known models
+            models = [
+                "claude-sonnet-4-20250514",
+                "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022",
+                "claude-3-opus-20240229",
+                "claude-3-sonnet-20240229",
+                "claude-3-haiku-20240307"
+            ]
+
+        elif provider_type == 'openrouter':
+            if not api_key:
+                api_key = os.getenv('OPENROUTER_API_KEY') or os.getenv('OPEN_ROUTER_API_KEY')
+            if not api_key:
+                raise HTTPException(status_code=400, detail="OpenRouter API key required")
+
+            url = (base_url or "https://openrouter.ai/api/v1").rstrip('/') + "/models"
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                data = response.json()
+                models = sorted([m['id'] for m in data.get('data', [])])
+
+        elif provider_type == 'local':
+            # Query Ollama API
+            url = (base_url or "http://localhost:11434").rstrip('/')
+            # Ollama uses /api/tags for model list
+            if '/v1' in url:
+                url = url.replace('/v1', '')
+            url = url + "/api/tags"
+
+            async with httpx.AsyncClient() as client:
+                try:
+                    response = await client.get(url, timeout=10.0)
+                    response.raise_for_status()
+                    data = response.json()
+                    models = sorted([m['name'] for m in data.get('models', [])])
+                except Exception as e:
+                    logger.warning(f"Could not fetch Ollama models: {e}")
+                    models = ["llama3.2", "gemma3:27b", "mistral", "codellama"]
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown provider type: {provider_type}")
+
+        return {"models": models, "provider": provider_name, "count": len(models)}
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching models for {provider_name}: {e}")
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error fetching models for {provider_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/bookmark", response_model=ProcessingStatus)
 async def receive_bookmark(bookmark: BookmarkCapture):
     """Receive a bookmark from the browser extension"""
@@ -706,8 +966,8 @@ async def reprocess_tweet(
                 status_code=404, detail="No cached GraphQL found for tweet"
             )
 
-        # If part of a thread, load all
-        if tweets_to_process[0].is_self_thread and cache_file:
+        # If part of a thread, load all (safe access - we know list is not empty here)
+        if tweets_to_process and tweets_to_process[0].is_self_thread and cache_file:
             thread_tweets = loader.extract_all_thread_tweets_from_cache(cache_file)
             if len(thread_tweets) > 1:
                 tweets_to_process = thread_tweets
@@ -830,6 +1090,138 @@ async def trigger_huggingface_likes(request: HuggingFaceTriggerRequest):
             },
             "stats": serialize_processing_stats(stats),
         }
+
+
+@app.post("/api/digest")
+async def generate_digest(request: DigestRequest):
+    """Generate digest notes for content discovery in Obsidian."""
+    from processors.digest_generator import DigestGenerator, send_ntfy_notification
+
+    try:
+        generator = DigestGenerator()
+        generated_files = []
+
+        if request.digest_type == "weekly":
+            # Calculate week range
+            if request.week:
+                try:
+                    year, week = request.week.split("-W")
+                    week_start = datetime.strptime(f"{year}-W{week}-1", "%Y-W%W-%w")
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid week format: {request.week}. Use YYYY-WNN"
+                    )
+            else:
+                today = datetime.now()
+                week_start = today - timedelta(days=today.weekday())
+
+            filepath = generator.generate_weekly_digest(week_start=week_start)
+            generated_files.append(filepath)
+
+        elif request.digest_type == "inbox":
+            filepath = generator.generate_inbox_view()
+            generated_files.append(filepath)
+
+        elif request.digest_type == "dashboard":
+            filepath = generator.generate_discovery_dashboard()
+            generated_files.append(filepath)
+
+        elif request.digest_type == "all":
+            generated_files.append(generator.generate_discovery_dashboard())
+            generated_files.append(generator.generate_inbox_view())
+            generated_files.append(generator.generate_weekly_digest())
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid digest type: {request.digest_type}"
+            )
+
+        # Send notification if requested
+        notification_sent = False
+        if request.notify and generated_files:
+            file_names = [Path(f).name for f in generated_files]
+            notification_sent = send_ntfy_notification(
+                title="XMarks Digest Ready",
+                message=f"Generated {len(generated_files)} digest files: {', '.join(file_names)}"
+            )
+
+        return {
+            "status": "ok",
+            "digest_type": request.digest_type,
+            "generated_files": [Path(f).name for f in generated_files],
+            "digests_dir": str(generator.digests_dir),
+            "notification_sent": notification_sent
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating digest: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/digests")
+async def list_digests():
+    """List all available digest files."""
+    from processors.digest_generator import DigestGenerator
+
+    try:
+        generator = DigestGenerator()
+        digests_dir = generator.digests_dir
+
+        if not digests_dir.exists():
+            return {"digests": [], "digests_dir": str(digests_dir)}
+
+        digests = []
+        for md_file in sorted(digests_dir.glob("*.md"), reverse=True):
+            stat = md_file.stat()
+            digests.append({
+                "name": md_file.name,
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+
+        return {
+            "digests": digests,
+            "digests_dir": str(digests_dir),
+            "total": len(digests)
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing digests: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/digest/{filename}")
+async def get_digest_content(filename: str):
+    """Get the content of a specific digest file."""
+    from processors.digest_generator import DigestGenerator
+
+    try:
+        generator = DigestGenerator()
+        filepath = generator.digests_dir / filename
+
+        if not filepath.exists():
+            raise HTTPException(status_code=404, detail="Digest not found")
+
+        # Security: ensure path is within digests_dir
+        if not filepath.resolve().is_relative_to(generator.digests_dir.resolve()):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        content = filepath.read_text(encoding='utf-8')
+        return {
+            "filename": filename,
+            "content": content,
+            "size": len(content)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reading digest {filename}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/process")
@@ -970,29 +1362,66 @@ async def get_stats():
     }
 
 
-# Background processor
+# Background processor with graceful shutdown support
+_shutdown_event = asyncio.Event()
+_background_task = None
+
+
 async def background_processor():
-    """Process bookmarks from queue in background"""
-    while True:
+    """Process bookmarks from queue in background with graceful shutdown support"""
+    while not _shutdown_event.is_set():
         try:
-            bookmark_data = await PROCESSING_QUEUE.get()
+            # Use wait_for with timeout to allow checking shutdown event periodically
+            try:
+                bookmark_data = await asyncio.wait_for(
+                    PROCESSING_QUEUE.get(),
+                    timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+
             tweet_id = bookmark_data.get("tweet_id")
             logger.debug(f"Dequeued bookmark {tweet_id} for processing")
 
             await process_bookmark_async(bookmark_data)
+            PROCESSING_QUEUE.task_done()
 
+        except asyncio.CancelledError:
+            logger.info("Background processor cancelled")
+            break
         except Exception as e:
             logger.error(f"Background processor error: {e}")
-        finally:
-            PROCESSING_QUEUE.task_done()
+            try:
+                PROCESSING_QUEUE.task_done()
+            except ValueError:
+                pass  # task_done called too many times
+
+    logger.info("Background processor stopped")
 
 
 @app.on_event("startup")
 async def startup_event():
     """Start background processor on startup"""
-    asyncio.create_task(background_processor())
+    global _background_task
+    _shutdown_event.clear()
+    _background_task = asyncio.create_task(background_processor())
     await load_pending_bookmarks_from_db()
     logger.info("XMarks API server started")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully shutdown background processor"""
+    global _background_task
+    logger.info("Shutting down XMarks API server...")
+    _shutdown_event.set()
+    if _background_task:
+        _background_task.cancel()
+        try:
+            await _background_task
+        except asyncio.CancelledError:
+            pass
+    logger.info("XMarks API server stopped")
 
 
 def main():
