@@ -148,23 +148,8 @@ class ContentProcessor:
         """Create enhanced markdown content for tweet"""
         lines = []
 
-        # YAML frontmatter using MarkdownGenerator
-        metadata = {
-            "type": "tweet",
-            "id": tweet.id,
-            "author": tweet.screen_name,
-            "created_at": tweet.created_at,
-            "url": f"https://twitter.com/{tweet.screen_name}/status/{tweet.id}",
-            "enhanced": tweet.enhanced,
-            "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-        if tweet.thread_id:
-            metadata["thread_id"] = tweet.thread_id
-
-        if tweet.display_type:
-            metadata["display_type"] = tweet.display_type
-
+        # YAML frontmatter using MarkdownGenerator with rich metadata
+        metadata = MarkdownGenerator.build_tweet_frontmatter(tweet)
         lines.extend(MarkdownGenerator.generate_frontmatter(metadata))
 
         # Main content

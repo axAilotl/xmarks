@@ -4,26 +4,217 @@ Consolidates duplicate markdown generation logic from ContentProcessor and Threa
 """
 
 import time
+import math
 from typing import List, Optional, Dict, Any, Union
+from datetime import datetime
 
 
 class MarkdownGenerator:
     """Shared utility for generating markdown sections used by both tweet and thread processors"""
-    
+
     @staticmethod
     def generate_frontmatter(metadata: Dict[str, Any]) -> List[str]:
-        """Generate YAML frontmatter for markdown files"""
+        """Generate YAML frontmatter for markdown files
+
+        Handles various types:
+        - strings: quoted
+        - lists: YAML list format
+        - booleans/numbers: unquoted
+        - None: skipped
+        """
         lines = ["---"]
-        
+
         for key, value in metadata.items():
-            if isinstance(value, str):
-                lines.append(f"{key}: \"{value}\"")
+            if value is None:
+                continue
+            elif isinstance(value, list):
+                # YAML list format for Dataview compatibility
+                if value:  # Only add non-empty lists
+                    formatted_items = [f'"{item}"' if isinstance(item, str) else str(item) for item in value]
+                    lines.append(f"{key}: [{', '.join(formatted_items)}]")
+            elif isinstance(value, bool):
+                lines.append(f"{key}: {str(value).lower()}")
+            elif isinstance(value, str):
+                # Escape quotes in strings
+                escaped = value.replace('"', '\\"')
+                lines.append(f'{key}: "{escaped}"')
             else:
                 lines.append(f"{key}: {value}")
-        
+
         lines.append("---")
         lines.append("")
         return lines
+
+    @staticmethod
+    def calculate_importance_score(tweet: Any) -> int:
+        """Calculate an importance score (0-100) for prioritizing content
+
+        Factors:
+        - Engagement (likes, retweets, replies)
+        - Content richness (papers, repos, threads, media)
+        - Content length
+        """
+        score = 0.0
+
+        # Engagement scoring (up to 50 points)
+        likes = getattr(tweet, 'favorite_count', 0) or 0
+        retweets = getattr(tweet, 'retweet_count', 0) or 0
+        replies = getattr(tweet, 'reply_count', 0) or 0
+
+        # Log scale for engagement (viral tweets don't dominate too much)
+        if likes > 0:
+            score += min(math.log10(likes + 1) * 10, 25)
+        if retweets > 0:
+            score += min(math.log10(retweets + 1) * 8, 15)
+        if replies > 0:
+            score += min(math.log10(replies + 1) * 5, 10)
+
+        # Content richness (up to 40 points)
+        if hasattr(tweet, 'arxiv_papers') and tweet.arxiv_papers:
+            score += 15  # Papers are high value
+        if hasattr(tweet, 'repo_links') and tweet.repo_links:
+            score += 10
+        if hasattr(tweet, 'youtube_videos') and tweet.youtube_videos:
+            score += 8
+        if hasattr(tweet, 'pdf_links') and tweet.pdf_links:
+            score += 5
+        if getattr(tweet, 'is_self_thread', False):
+            score += 5  # Threads often have more context
+
+        # Content length bonus (up to 10 points)
+        text_len = len(getattr(tweet, 'full_text', '') or '')
+        if text_len > 500:
+            score += 10
+        elif text_len > 280:
+            score += 5
+
+        return min(int(score), 100)
+
+    @staticmethod
+    def build_tweet_frontmatter(tweet: Any, include_status: bool = True) -> Dict[str, Any]:
+        """Build comprehensive frontmatter metadata from a Tweet object
+
+        This creates Dataview-queryable frontmatter with:
+        - Basic info (type, id, author, dates)
+        - Engagement metrics (likes, retweets, replies)
+        - Content flags (has_paper, has_repo, etc.)
+        - Tags (as YAML list)
+        - Importance score
+        - Reading status
+        """
+        metadata = {
+            # Basic identification
+            "type": "tweet",
+            "id": tweet.id,
+            "author": tweet.screen_name,
+            "author_name": getattr(tweet, 'name', None),
+
+            # Dates
+            "created": tweet.created_at,
+            "processed": time.strftime("%Y-%m-%dT%H:%M:%S"),
+
+            # URL
+            "url": f"https://twitter.com/{tweet.screen_name}/status/{tweet.id}",
+
+            # Engagement metrics (Dataview can query these!)
+            "likes": getattr(tweet, 'favorite_count', 0) or 0,
+            "retweets": getattr(tweet, 'retweet_count', 0) or 0,
+            "replies": getattr(tweet, 'reply_count', 0) or 0,
+
+            # Content classification flags
+            "has_paper": bool(hasattr(tweet, 'arxiv_papers') and tweet.arxiv_papers),
+            "has_repo": bool(hasattr(tweet, 'repo_links') and tweet.repo_links),
+            "has_video": bool(any(m.media_type in ['video', 'animated_gif'] for m in (tweet.media_items or []))),
+            "has_images": bool(any(m.media_type == 'photo' for m in (tweet.media_items or []))),
+            "has_youtube": bool(hasattr(tweet, 'youtube_videos') and tweet.youtube_videos),
+            "has_pdf": bool(hasattr(tweet, 'pdf_links') and tweet.pdf_links),
+            "is_thread": getattr(tweet, 'is_self_thread', False),
+
+            # Content metrics
+            "word_count": len((getattr(tweet, 'full_text', '') or '').split()),
+
+            # Thread info
+            "thread_id": getattr(tweet, 'thread_id', None),
+
+            # Importance score for prioritization
+            "importance": MarkdownGenerator.calculate_importance_score(tweet),
+
+            # Processing metadata
+            "enhanced": getattr(tweet, 'enhanced', False),
+        }
+
+        # Add tags as YAML list (for Dataview)
+        if hasattr(tweet, 'llm_tags') and tweet.llm_tags:
+            # Clean tags: remove #, lowercase, replace spaces
+            clean_tags = [tag.lstrip('#').lower().replace(' ', '-') for tag in tweet.llm_tags]
+            metadata["tags"] = clean_tags
+
+        # Reading status (can be updated manually or via script)
+        if include_status:
+            metadata["status"] = "unread"
+
+        return metadata
+
+    @staticmethod
+    def build_thread_frontmatter(thread_id: str, thread_tweets: List[Any]) -> Dict[str, Any]:
+        """Build comprehensive frontmatter for a thread"""
+        first_tweet = thread_tweets[0]
+
+        # Aggregate engagement across all tweets in thread
+        total_likes = sum(getattr(t, 'favorite_count', 0) or 0 for t in thread_tweets)
+        total_retweets = sum(getattr(t, 'retweet_count', 0) or 0 for t in thread_tweets)
+        total_replies = sum(getattr(t, 'reply_count', 0) or 0 for t in thread_tweets)
+
+        # Check for papers/repos across all tweets
+        has_paper = any(hasattr(t, 'arxiv_papers') and t.arxiv_papers for t in thread_tweets)
+        has_repo = any(hasattr(t, 'repo_links') and t.repo_links for t in thread_tweets)
+        has_youtube = any(hasattr(t, 'youtube_videos') and t.youtube_videos for t in thread_tweets)
+        has_pdf = any(hasattr(t, 'pdf_links') and t.pdf_links for t in thread_tweets)
+
+        # Total word count
+        total_words = sum(len((getattr(t, 'full_text', '') or '').split()) for t in thread_tweets)
+
+        metadata = {
+            "type": "thread",
+            "thread_id": thread_id,
+            "author": first_tweet.screen_name,
+            "author_name": getattr(first_tweet, 'name', None),
+            "tweet_count": len(thread_tweets),
+
+            # Dates
+            "created": first_tweet.created_at,
+            "processed": time.strftime("%Y-%m-%dT%H:%M:%S"),
+
+            # URL
+            "url": f"https://twitter.com/{first_tweet.screen_name}/status/{first_tweet.id}",
+
+            # Aggregated engagement
+            "likes": total_likes,
+            "retweets": total_retweets,
+            "replies": total_replies,
+
+            # Content flags
+            "has_paper": has_paper,
+            "has_repo": has_repo,
+            "has_youtube": has_youtube,
+            "has_pdf": has_pdf,
+
+            # Content metrics
+            "word_count": total_words,
+
+            # Calculate importance (use first tweet as proxy, boost for being a thread)
+            "importance": min(MarkdownGenerator.calculate_importance_score(first_tweet) + 10, 100),
+
+            "enhanced": True,
+            "status": "unread",
+        }
+
+        # Add thread tags
+        if hasattr(first_tweet, 'thread_tags') and first_tweet.thread_tags:
+            clean_tags = [tag.lstrip('#').lower().replace(' ', '-') for tag in first_tweet.thread_tags]
+            metadata["tags"] = clean_tags
+
+        return metadata
     
     @staticmethod
     def generate_arxiv_section(papers: List[Any], detailed: bool = True) -> List[str]:

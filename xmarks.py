@@ -1279,6 +1279,82 @@ async def cmd_database(args):
         print("❌ Unknown database action. Use: stats, vacuum, or export")
 
 
+async def cmd_digest(args):
+    """Generate digest notes for content discovery"""
+    from processors.digest_generator import DigestGenerator, send_ntfy_notification
+    from datetime import datetime, timedelta
+
+    generator = DigestGenerator()
+    generated_files = []
+
+    if args.digest_type == "weekly":
+        print("📰 Generating Weekly Digest")
+
+        # Calculate week range
+        if args.week:
+            # Parse week string like "2024-W52"
+            try:
+                year, week = args.week.split("-W")
+                # Get first day of that week
+                week_start = datetime.strptime(f"{year}-W{week}-1", "%Y-W%W-%w")
+            except ValueError:
+                print(f"❌ Invalid week format: {args.week}. Use YYYY-WNN (e.g., 2024-W52)")
+                return
+        else:
+            # Current week
+            today = datetime.now()
+            week_start = today - timedelta(days=today.weekday())
+
+        filepath = generator.generate_weekly_digest(week_start=week_start)
+        generated_files.append(filepath)
+        print(f"✅ Generated: {filepath}")
+
+    elif args.digest_type == "inbox":
+        print("📬 Generating Inbox View")
+        filepath = generator.generate_inbox_view()
+        generated_files.append(filepath)
+        print(f"✅ Generated: {filepath}")
+
+    elif args.digest_type == "dashboard":
+        print("📊 Generating Discovery Dashboard")
+        filepath = generator.generate_discovery_dashboard()
+        generated_files.append(filepath)
+        print(f"✅ Generated: {filepath}")
+
+    elif args.digest_type == "all":
+        print("📰 Generating All Digest Views")
+
+        # Generate all types
+        dashboard_path = generator.generate_discovery_dashboard()
+        generated_files.append(dashboard_path)
+        print(f"✅ Dashboard: {dashboard_path}")
+
+        inbox_path = generator.generate_inbox_view()
+        generated_files.append(inbox_path)
+        print(f"✅ Inbox: {inbox_path}")
+
+        weekly_path = generator.generate_weekly_digest()
+        generated_files.append(weekly_path)
+        print(f"✅ Weekly: {weekly_path}")
+
+        print(f"\n📁 Digest files created in: {generator.digests_dir}")
+
+    else:
+        print(f"❌ Unknown digest type: {args.digest_type}")
+        print("Available types: weekly, inbox, dashboard, all")
+        return
+
+    # Send notification if requested
+    if getattr(args, "notify", False) and generated_files:
+        file_names = [Path(f).name for f in generated_files]
+        send_ntfy_notification(
+            title="XMarks Digest Ready",
+            message=f"Generated {len(generated_files)} digest files: {', '.join(file_names)}",
+            topic=getattr(args, "ntfy_topic", "xmarks")
+        )
+        print("📬 Notification sent")
+
+
 async def cmd_migrate_filenames(args):
     """Filename migration command"""
     from core.filename_utils import get_filename_migrator
@@ -1657,6 +1733,34 @@ Examples:
         "--analyze", action="store_true", help="Only analyze what needs migration"
     )
 
+    # Digest generation command
+    digest_parser = subparsers.add_parser(
+        "digest", help="Generate digest notes for content discovery in Obsidian"
+    )
+    digest_parser.add_argument(
+        "digest_type",
+        nargs="?",
+        default="all",
+        choices=["weekly", "inbox", "dashboard", "all"],
+        help="Type of digest to generate (default: all)",
+    )
+    digest_parser.add_argument(
+        "--week",
+        type=str,
+        help="Specific week for weekly digest (format: YYYY-WNN, e.g., 2024-W52)",
+    )
+    digest_parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send ntfy notification when digest is complete",
+    )
+    digest_parser.add_argument(
+        "--ntfy-topic",
+        type=str,
+        default="xmarks",
+        help="ntfy topic to send notification to (default: xmarks)",
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -1672,6 +1776,7 @@ Examples:
             "update-videos",
             "youtube",
             "twitter-transcripts",
+            "digest",
         }
         if args.command not in offline_safe:  # Block only network-heavy commands
             print("❌ Cannot proceed with invalid configuration for this command")
@@ -1711,6 +1816,8 @@ Examples:
             asyncio.run(cmd_database(args))
         elif args.command == "migrate-filenames":
             asyncio.run(cmd_migrate_filenames(args))
+        elif args.command == "digest":
+            asyncio.run(cmd_digest(args))
     except KeyboardInterrupt:
         print("\n❌ Interrupted by user")
         sys.exit(1)

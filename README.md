@@ -55,6 +55,7 @@ Enable the backend in `config.json` under `"whisper"` (or use `"deepgram"` if yo
 | `download` | Fetch TweetDetail GraphQL via Playwright. | `--limit`, `--resume/--no-resume`, `--cookies` |
 | `process` | Convert raw bookmarks (JSON) straight to markdown. | `--use-cache`, `--limit`, `--dry-run`* |
 | `pipeline` | Single-pass download → enrich → markdown. | `--use-cache`, `--batch-size`, `--dry-run`, `--rerun-llm`, `--tweet-ids` |
+| `digest` | Generate weekly/inbox/dashboard views for Obsidian. | `weekly`, `inbox`, `dashboard`, `all`, `--notify` |
 | `delete` | Delete a tweet and all its artifacts. | `<tweet_id>`, `--dry-run` |
 | `async-test` | Benchmark async LLM throughput. | `--limit`, `--concurrent`, `--timeout` |
 | `youtube` | Refresh cached tweets with YouTube metadata/transcripts. | `--limit`, `--resume` |
@@ -131,6 +132,71 @@ xmarks/
 
 ---
 
+## Digest & Discovery (Obsidian + Dataview)
+
+XMarks generates rich frontmatter metadata that works with Obsidian's [Dataview](https://github.com/blacksmithgu/obsidian-dataview) plugin for powerful filtering and discovery.
+
+### Generate Digests
+```bash
+# Generate all digest views (dashboard, inbox, weekly)
+python xmarks.py digest
+
+# Generate specific type
+python xmarks.py digest weekly
+python xmarks.py digest inbox
+
+# With ntfy notification
+python xmarks.py digest all --notify
+```
+
+### Auto-Generated Files (`_digests/`)
+| File | Purpose |
+| --- | --- |
+| `dashboard.md` | Main discovery hub with category views |
+| `inbox.md` | Unread items queue with Dataview queries |
+| `2024-W52.md` | Weekly digest with stats and highlights |
+| `query-examples.md` | Reference for all Dataview queries |
+
+### Frontmatter Fields (Dataview-queryable)
+```yaml
+type: "tweet"
+author: "karpathy"
+likes: 5200
+retweets: 890
+importance: 75          # 0-100 calculated score
+has_paper: true         # Contains ArXiv paper
+has_repo: false         # Contains GitHub/HF repo
+has_video: true         # Has Twitter video
+status: "unread"        # unread, read, archived
+tags: ["llm", "ml"]     # LLM-generated tags
+```
+
+### Example Dataview Queries
+```dataview
+TABLE author, likes, importance
+FROM "tweets" OR "threads"
+WHERE has_paper = true AND status = "unread"
+SORT importance DESC
+LIMIT 15
+```
+
+### Scheduled Digests
+Add to crontab for weekly digest generation:
+```bash
+# Sundays at noon with ntfy notification
+0 12 * * 0 cd /path/to/xmarks && .venv/bin/python xmarks.py digest all --notify
+```
+
+Configure ntfy in `config.json`:
+```json
+"ntfy": {
+  "server": "https://ntfy.example.com",
+  "topic": "xmarks"
+}
+```
+
+---
+
 ## Tips
 - **FFmpeg** – required for audio extraction (`ffmpeg` & `ffprobe`).
 - **Respect rate limits** – `download` defaults to `--resume`; use small `--limit` values when iterating.
@@ -139,6 +205,7 @@ xmarks/
 - **Test deletion** – `python xmarks.py delete <tweet_id> --dry-run` shows what would be deleted.
 - **Browser capture** – The userscript automatically captures bookmarks as you browse, no manual export needed.
 - **Auto-cleanup** – Unbookmarking in the browser can automatically delete all local artifacts (configurable in userscript).
+- **Digest discovery** – Run `python xmarks.py digest` to generate Obsidian-friendly discovery views.
 
 ---
 

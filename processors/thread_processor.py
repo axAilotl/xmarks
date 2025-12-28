@@ -125,18 +125,8 @@ class ThreadProcessor:
 
         lines = []
 
-        # YAML frontmatter using MarkdownGenerator
-        metadata = {
-            "type": "thread",
-            "thread_id": thread_id,
-            "author": first_tweet.screen_name,
-            "tweet_count": len(thread_tweets),
-            "created_at": first_tweet.created_at,
-            "url": f"https://twitter.com/{first_tweet.screen_name}/status/{first_tweet.id}",
-            "enhanced": True,
-            "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
+        # YAML frontmatter using MarkdownGenerator with rich metadata
+        metadata = MarkdownGenerator.build_thread_frontmatter(thread_id, thread_tweets)
         lines.extend(MarkdownGenerator.generate_frontmatter(metadata))
 
         # Main content
