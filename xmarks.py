@@ -1279,6 +1279,332 @@ async def cmd_database(args):
         print("❌ Unknown database action. Use: stats, vacuum, or export")
 
 
+async def cmd_migrate_frontmatter(args):
+    """Migrate existing markdown files to enhanced frontmatter format for Dataview"""
+    import re
+    import yaml
+    import json
+    import math
+    from pathlib import Path
+    from core.config import config
+
+    vault_dir = Path(config.get("paths.vault_dir", "knowledge_vault"))
+    tweets_dir = vault_dir / "tweets"
+    threads_dir = vault_dir / "threads"
+    cache_dir = Path(config.get("paths.cache_dir", "graphql_cache"))
+
+    dry_run = args.dry_run
+    updated = 0
+    skipped = 0
+    errors = 0
+    enhanced_count = 0
+
+    # Build a cache of tweet_id -> graphql file
+    graphql_cache = {}
+    if cache_dir.exists():
+        for cache_file in cache_dir.glob("tweet_*.json"):
+            # Extract tweet_id from filename like tweet_1234567890_timestamp.json
+            parts = cache_file.stem.split('_')
+            if len(parts) >= 2:
+                tweet_id = parts[1]
+                # Keep the most recent cache file for each tweet
+                if tweet_id not in graphql_cache:
+                    graphql_cache[tweet_id] = cache_file
+        print(f"Found {len(graphql_cache)} GraphQL cache files")
+
+    def find_legacy_in_graphql(obj, depth=0):
+        """Recursively find the legacy object with engagement metrics"""
+        if depth > 15:
+            return None
+        if isinstance(obj, dict):
+            if 'legacy' in obj and isinstance(obj.get('legacy'), dict):
+                legacy = obj['legacy']
+                if 'favorite_count' in legacy:
+                    return legacy
+            for v in obj.values():
+                r = find_legacy_in_graphql(v, depth + 1)
+                if r:
+                    return r
+        elif isinstance(obj, list):
+            for item in obj:
+                r = find_legacy_in_graphql(item, depth + 1)
+                if r:
+                    return r
+        return None
+
+    def get_engagement_from_cache(tweet_id: str) -> dict:
+        """Get engagement metrics from GraphQL cache"""
+        nonlocal enhanced_count
+        if tweet_id not in graphql_cache:
+            return {'likes': 0, 'retweets': 0, 'replies': 0}
+
+        try:
+            with open(graphql_cache[tweet_id], 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            legacy = find_legacy_in_graphql(data)
+            if legacy:
+                enhanced_count += 1
+                return {
+                    'likes': legacy.get('favorite_count', 0) or 0,
+                    'retweets': legacy.get('retweet_count', 0) or 0,
+                    'replies': legacy.get('reply_count', 0) or 0,
+                }
+        except:
+            pass
+        return {'likes': 0, 'retweets': 0, 'replies': 0}
+
+    def calculate_importance(likes, retweets, replies, has_paper, has_repo, has_youtube, is_thread, word_count):
+        """Calculate importance score based on engagement and content"""
+        score = 0.0
+        if likes > 0:
+            score += min(math.log10(likes + 1) * 10, 25)
+        if retweets > 0:
+            score += min(math.log10(retweets + 1) * 8, 15)
+        if replies > 0:
+            score += min(math.log10(replies + 1) * 5, 10)
+        if has_paper: score += 15
+        if has_repo: score += 10
+        if has_youtube: score += 8
+        if is_thread: score += 5
+        if word_count > 200: score += 5
+        return min(int(score), 100)
+
+    def extract_tags_from_body(content: str) -> list:
+        """Extract tags from ## Tags section"""
+        lines = content.split('\n')
+        in_tags = False
+        tags = []
+        for line in lines:
+            if line.strip().startswith('## Tags'):
+                in_tags = True
+                continue
+            if in_tags:
+                if line.strip().startswith('## ') or line.strip().startswith('# '):
+                    break
+                found = re.findall(r'#([\w-]+)', line)
+                tags.extend(found)
+        return tags
+
+    def migrate_file(filepath: Path) -> bool:
+        nonlocal updated, skipped, errors
+
+        try:
+            content = filepath.read_text(encoding='utf-8')
+
+            if not content.startswith('---'):
+                skipped += 1
+                return False
+
+            end_idx = content.find('---', 3)
+            if end_idx == -1:
+                skipped += 1
+                return False
+
+            yaml_str = content[3:end_idx].strip()
+            body = content[end_idx + 3:].strip()
+
+            try:
+                fm = yaml.safe_load(yaml_str) or {}
+            except:
+                errors += 1
+                return False
+
+            # Check if already migrated
+            if 'importance' in fm and 'status' in fm:
+                skipped += 1
+                return False
+
+            # Extract tags from body
+            tags = extract_tags_from_body(body)
+            author = fm.get('author', '')
+            tags = [t for t in tags if t.lower() != author.lower()]
+
+            # Detect content types from body
+            has_paper = '## ArXiv' in body or 'arxiv.org' in body.lower()
+            has_repo = '## Repository' in body or 'github.com' in body.lower() or 'huggingface.co' in body.lower()
+            has_youtube = '## YouTube' in body or 'youtube.com' in body.lower()
+            has_video = '![[' in body and '.mp4' in body
+            has_images = '![[' in body and any(ext in body for ext in ['.jpg', '.png', '.gif'])
+            has_pdf = '## PDF' in body or '.pdf]]' in body
+
+            word_count = len(body.split())
+
+            # Get engagement from GraphQL cache
+            tweet_id = fm.get('id', '')
+            engagement = get_engagement_from_cache(tweet_id)
+
+            # Build new frontmatter
+            new_fm = {
+                'type': fm.get('type', 'tweet'),
+                'id': tweet_id,
+                'author': fm.get('author', ''),
+                'created': fm.get('created_at', fm.get('created', '')),
+                'processed': fm.get('processed_at', fm.get('processed', '')),
+                'url': fm.get('url', ''),
+                'likes': engagement['likes'],
+                'retweets': engagement['retweets'],
+                'replies': engagement['replies'],
+                'has_paper': has_paper,
+                'has_repo': has_repo,
+                'has_video': has_video,
+                'has_images': has_images,
+                'has_youtube': has_youtube,
+                'has_pdf': has_pdf,
+                'is_thread': fm.get('type') == 'thread',
+                'word_count': word_count,
+                'status': 'unread',
+                'enhanced': fm.get('enhanced', False),
+            }
+
+            if fm.get('thread_id'):
+                new_fm['thread_id'] = fm['thread_id']
+            if fm.get('tweet_count'):
+                new_fm['tweet_count'] = fm['tweet_count']
+
+            if tags:
+                new_fm['tags'] = tags[:10]
+
+            # Calculate importance with real engagement data
+            new_fm['importance'] = calculate_importance(
+                engagement['likes'], engagement['retweets'], engagement['replies'],
+                has_paper, has_repo, has_youtube,
+                new_fm.get('is_thread', False), word_count
+            )
+
+            # Generate YAML
+            lines = ['---']
+            for key, value in new_fm.items():
+                if value is None:
+                    continue
+                elif isinstance(value, list):
+                    if value:
+                        formatted = [f'"{v}"' for v in value]
+                        lines.append(f"{key}: [{', '.join(formatted)}]")
+                elif isinstance(value, bool):
+                    lines.append(f"{key}: {str(value).lower()}")
+                elif isinstance(value, str):
+                    escaped = value.replace('"', '\\"')
+                    lines.append(f'{key}: "{escaped}"')
+                else:
+                    lines.append(f"{key}: {value}")
+            lines.append('---')
+
+            new_content = '\n'.join(lines) + '\n\n' + body
+
+            if not dry_run:
+                filepath.write_text(new_content, encoding='utf-8')
+
+            updated += 1
+            return True
+
+        except Exception as e:
+            errors += 1
+            return False
+
+    print(f"{'[DRY RUN] ' if dry_run else ''}Migrating frontmatter for Dataview...")
+
+    if tweets_dir.exists():
+        tweet_files = list(tweets_dir.glob("*.md"))
+        print(f"\nProcessing {len(tweet_files)} tweets...")
+        for i, f in enumerate(tweet_files):
+            if i % 200 == 0 and i > 0:
+                print(f"  {i}/{len(tweet_files)}...")
+            migrate_file(f)
+
+    if threads_dir.exists():
+        thread_files = list(threads_dir.glob("*.md"))
+        print(f"\nProcessing {len(thread_files)} threads...")
+        for i, f in enumerate(thread_files):
+            if i % 100 == 0 and i > 0:
+                print(f"  {i}/{len(thread_files)}...")
+            migrate_file(f)
+
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Migration complete:")
+    print(f"  ✅ Updated: {updated}")
+    print(f"  📊 With engagement data from GraphQL: {enhanced_count}")
+    print(f"  ⏭️  Skipped (already migrated): {skipped}")
+    print(f"  ❌ Errors: {errors}")
+
+    if not dry_run and updated > 0:
+        print(f"\n💡 Run 'python xmarks.py digest' to regenerate digests with new data")
+
+
+async def cmd_digest(args):
+    """Generate digest notes for content discovery"""
+    from processors.digest_generator import DigestGenerator, send_ntfy_notification
+    from datetime import datetime, timedelta
+
+    generator = DigestGenerator()
+    generated_files = []
+
+    if args.digest_type == "weekly":
+        print("📰 Generating Weekly Digest")
+
+        # Calculate week range
+        if args.week:
+            # Parse week string like "2024-W52"
+            try:
+                year, week = args.week.split("-W")
+                # Get first day of that week
+                week_start = datetime.strptime(f"{year}-W{week}-1", "%Y-W%W-%w")
+            except ValueError:
+                print(f"❌ Invalid week format: {args.week}. Use YYYY-WNN (e.g., 2024-W52)")
+                return
+        else:
+            # Current week
+            today = datetime.now()
+            week_start = today - timedelta(days=today.weekday())
+
+        filepath = generator.generate_weekly_digest(week_start=week_start)
+        generated_files.append(filepath)
+        print(f"✅ Generated: {filepath}")
+
+    elif args.digest_type == "inbox":
+        print("📬 Generating Inbox View")
+        filepath = generator.generate_inbox_view()
+        generated_files.append(filepath)
+        print(f"✅ Generated: {filepath}")
+
+    elif args.digest_type == "dashboard":
+        print("📊 Generating Discovery Dashboard")
+        filepath = generator.generate_discovery_dashboard()
+        generated_files.append(filepath)
+        print(f"✅ Generated: {filepath}")
+
+    elif args.digest_type == "all":
+        print("📰 Generating All Digest Views")
+
+        # Generate all types
+        dashboard_path = generator.generate_discovery_dashboard()
+        generated_files.append(dashboard_path)
+        print(f"✅ Dashboard: {dashboard_path}")
+
+        inbox_path = generator.generate_inbox_view()
+        generated_files.append(inbox_path)
+        print(f"✅ Inbox: {inbox_path}")
+
+        weekly_path = generator.generate_weekly_digest()
+        generated_files.append(weekly_path)
+        print(f"✅ Weekly: {weekly_path}")
+
+        print(f"\n📁 Digest files created in: {generator.digests_dir}")
+
+    else:
+        print(f"❌ Unknown digest type: {args.digest_type}")
+        print("Available types: weekly, inbox, dashboard, all")
+        return
+
+    # Send notification if requested
+    if getattr(args, "notify", False) and generated_files:
+        file_names = [Path(f).name for f in generated_files]
+        send_ntfy_notification(
+            title="XMarks Digest Ready",
+            message=f"Generated {len(generated_files)} digest files: {', '.join(file_names)}",
+            topic=getattr(args, "ntfy_topic", "xmarks")
+        )
+        print("📬 Notification sent")
+
+
 async def cmd_migrate_filenames(args):
     """Filename migration command"""
     from core.filename_utils import get_filename_migrator
@@ -1657,6 +1983,44 @@ Examples:
         "--analyze", action="store_true", help="Only analyze what needs migration"
     )
 
+    # Frontmatter migration command
+    migrate_fm_parser = subparsers.add_parser(
+        "migrate-frontmatter", help="Migrate existing files to enhanced frontmatter for Dataview"
+    )
+    migrate_fm_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without writing to files",
+    )
+
+    # Digest generation command
+    digest_parser = subparsers.add_parser(
+        "digest", help="Generate digest notes for content discovery in Obsidian"
+    )
+    digest_parser.add_argument(
+        "digest_type",
+        nargs="?",
+        default="all",
+        choices=["weekly", "inbox", "dashboard", "all"],
+        help="Type of digest to generate (default: all)",
+    )
+    digest_parser.add_argument(
+        "--week",
+        type=str,
+        help="Specific week for weekly digest (format: YYYY-WNN, e.g., 2024-W52)",
+    )
+    digest_parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send ntfy notification when digest is complete",
+    )
+    digest_parser.add_argument(
+        "--ntfy-topic",
+        type=str,
+        default="xmarks",
+        help="ntfy topic to send notification to (default: xmarks)",
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -1672,6 +2036,8 @@ Examples:
             "update-videos",
             "youtube",
             "twitter-transcripts",
+            "digest",
+            "migrate-frontmatter",
         }
         if args.command not in offline_safe:  # Block only network-heavy commands
             print("❌ Cannot proceed with invalid configuration for this command")
@@ -1711,6 +2077,10 @@ Examples:
             asyncio.run(cmd_database(args))
         elif args.command == "migrate-filenames":
             asyncio.run(cmd_migrate_filenames(args))
+        elif args.command == "migrate-frontmatter":
+            asyncio.run(cmd_migrate_frontmatter(args))
+        elif args.command == "digest":
+            asyncio.run(cmd_digest(args))
     except KeyboardInterrupt:
         print("\n❌ Interrupted by user")
         sys.exit(1)

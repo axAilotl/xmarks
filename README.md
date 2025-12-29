@@ -55,6 +55,7 @@ Enable the backend in `config.json` under `"whisper"` (or use `"deepgram"` if yo
 | `download` | Fetch TweetDetail GraphQL via Playwright. | `--limit`, `--resume/--no-resume`, `--cookies` |
 | `process` | Convert raw bookmarks (JSON) straight to markdown. | `--use-cache`, `--limit`, `--dry-run`* |
 | `pipeline` | Single-pass download → enrich → markdown. | `--use-cache`, `--batch-size`, `--dry-run`, `--rerun-llm`, `--tweet-ids` |
+| `digest` | Generate weekly/inbox/dashboard views for Obsidian. | `weekly`, `inbox`, `dashboard`, `all`, `--notify` |
 | `delete` | Delete a tweet and all its artifacts. | `<tweet_id>`, `--dry-run` |
 | `async-test` | Benchmark async LLM throughput. | `--limit`, `--concurrent`, `--timeout` |
 | `youtube` | Refresh cached tweets with YouTube metadata/transcripts. | `--limit`, `--resume` |
@@ -63,6 +64,7 @@ Enable the backend in `config.json` under `"whisper"` (or use `"deepgram"` if yo
 | `github-stars` / `huggingface-likes` | Summarise starred/liked repos. | `--limit`, `--resume`, `--include-*` |
 | `db` | Inspect or vacuum the SQLite database. | `db stats`, `db vacuum`, `db export` |
 | `migrate-filenames` | Normalise filenames/backlinks in the vault. | `--dry-run`, `--analyze` |
+| `migrate-frontmatter` | Update existing files with Dataview-compatible frontmatter. | `--dry-run` |
 | `full` | Run complete pipeline: download + process. | `--limit`, `--resume` |
 
 \*`--dry-run` works with `--use-cache` and prints a plan without touching the filesystem.
@@ -131,6 +133,102 @@ xmarks/
 
 ---
 
+## Digest & Discovery (Obsidian + Dataview)
+
+XMarks generates rich frontmatter metadata that works with Obsidian's [Dataview](https://github.com/blacksmithgu/obsidian-dataview) plugin for powerful filtering and discovery.
+
+### Generate Digests
+```bash
+# Generate all digest views (dashboard, inbox, weekly)
+python xmarks.py digest
+
+# Generate specific type
+python xmarks.py digest weekly
+python xmarks.py digest inbox
+
+# With ntfy notification
+python xmarks.py digest all --notify
+```
+
+### Auto-Generated Files (`_digests/`)
+| File | Purpose |
+| --- | --- |
+| `dashboard.md` | Main discovery hub with category views |
+| `inbox.md` | Unread items queue with Dataview queries |
+| `2024-W52.md` | Weekly digest with stats and highlights |
+| `query-examples.md` | Reference for all Dataview queries |
+
+### Frontmatter Fields (Dataview-queryable)
+```yaml
+type: "tweet"
+author: "karpathy"
+likes: 5200
+retweets: 890
+importance: 75          # 0-100 calculated score
+has_paper: true         # Contains ArXiv paper
+has_repo: false         # Contains GitHub/HF repo
+has_video: true         # Has Twitter video
+status: "unread"        # unread, read, archived
+tags: ["llm", "ml"]     # LLM-generated tags
+```
+
+### Example Dataview Queries
+```dataview
+TABLE author, likes, importance
+FROM "tweets" OR "threads"
+WHERE has_paper = true AND status = "unread"
+SORT importance DESC
+LIMIT 15
+```
+
+### Scheduled Digests
+Add to crontab for weekly digest generation:
+```bash
+# Sundays at noon with ntfy notification
+0 12 * * 0 cd /path/to/xmarks && .venv/bin/python xmarks.py digest all --notify
+```
+
+Configure ntfy in `config.json`:
+```json
+"ntfy": {
+  "server": "https://ntfy.example.com",
+  "topic": "xmarks",
+  "user": "your-username",
+  "password": "your-password"
+}
+```
+
+Or via environment variables: `NTFY_SERVER`, `NTFY_USER`, `NTFY_PASS`
+
+### Dataview Path Configuration
+
+If your `knowledge_vault/` is a subfolder within your Obsidian vault (not the vault root), configure the path prefix:
+
+```json
+"dataview": {
+  "path_prefix": "knowledge_vault"
+}
+```
+
+Set to `""` (empty string) if `tweets/` and `threads/` are at the vault root.
+
+### Migrating Existing Content
+
+If you have existing markdown files without the enhanced frontmatter fields:
+
+```bash
+# Preview what would be updated
+python xmarks.py migrate-frontmatter --dry-run
+
+# Run the migration (pulls engagement data from GraphQL cache)
+python xmarks.py migrate-frontmatter
+
+# Regenerate digests with new data
+python xmarks.py digest all
+```
+
+---
+
 ## Tips
 - **FFmpeg** – required for audio extraction (`ffmpeg` & `ffprobe`).
 - **Respect rate limits** – `download` defaults to `--resume`; use small `--limit` values when iterating.
@@ -139,6 +237,7 @@ xmarks/
 - **Test deletion** – `python xmarks.py delete <tweet_id> --dry-run` shows what would be deleted.
 - **Browser capture** – The userscript automatically captures bookmarks as you browse, no manual export needed.
 - **Auto-cleanup** – Unbookmarking in the browser can automatically delete all local artifacts (configurable in userscript).
+- **Digest discovery** – Run `python xmarks.py digest` to generate Obsidian-friendly discovery views.
 
 ---
 
